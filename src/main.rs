@@ -1,3 +1,10 @@
+mod cli;
+mod error;
+mod logger;
+
 fn main() {
-    println!("Hello, world!");
+    if let Err(e) = cli::run() {
+        log::error!("{}", e);
+        std::process::exit(1);
+    }
 }

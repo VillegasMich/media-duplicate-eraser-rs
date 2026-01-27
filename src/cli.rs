@@ -1,0 +1,52 @@
+use clap::{Parser, Subcommand};
+
+use crate::error::Result;
+use crate::logger;
+
+#[derive(Parser)]
+#[command(name = "mde")]
+#[command(author, version, about = "Find and remove duplicate media files", long_about = None)]
+pub struct Cli {
+    /// Increase verbosity (-v for info, -vv for debug)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Suppress all output except errors
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Scan directories for duplicate media files
+    Scan {
+        /// Directories to scan for duplicates
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+
+        /// Perform recursive scan
+        #[arg(short, long, default_value_t = true)]
+        recursive: bool,
+    },
+}
+
+pub fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    logger::init(cli.verbose, cli.quiet);
+
+    match cli.command {
+        Commands::Scan { paths, recursive } => {
+            log::info!("Starting scan of {} directories", paths.len());
+            log::debug!("Paths: {:?}, recursive: {}", paths, recursive);
+
+            // TODO: Implement scan logic
+            println!("Scanning directories: {:?}", paths);
+        }
+    }
+
+    Ok(())
+}
