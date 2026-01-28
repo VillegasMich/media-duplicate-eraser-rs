@@ -1,4 +1,18 @@
-# Media Duplicate Eraser (mde)
+<table align="center">
+  <tr>
+    <td style="vertical-align: bottom;">
+      <h1 style="margin: 0;">Media Duplicate Eraser (mde)</h1>
+    </td>
+    <td style="vertical-align: bottom; padding-left: 14px;">
+      <img
+        src="https://github.com/user-attachments/assets/c97f6711-5ce5-4f43-b12c-d963333fe851"
+        width="64"
+        alt="mde icon"
+      />
+    </td>
+  </tr>
+</table>
+
 
 A CLI tool to find and remove duplicate media files.
 
