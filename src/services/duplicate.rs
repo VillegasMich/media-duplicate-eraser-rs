@@ -71,7 +71,7 @@ impl DuplicateReport {
 
 /// Finds duplicate images using a two-pass approach.
 pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
-    let mut groups = Vec::new();
+    let mut exact_groups: Vec<DuplicateGroup> = Vec::new();
     let mut errors = 0;
     let total_files = files.len();
 
@@ -83,35 +83,109 @@ pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
 
     // Pass 2: Within each size group, find exact duplicates by SHA256
     log::debug!("Pass 2: Finding exact duplicates by SHA256");
-    let mut remaining_files: Vec<PathBuf> = Vec::new();
+    let mut files_for_perceptual: Vec<PathBuf> = Vec::new();
 
     for (_size, paths) in size_groups {
         if paths.len() < 2 {
-            // Only one file with this size, might still be perceptually similar
-            remaining_files.extend(paths);
+            // Only one file with this size, still needs perceptual comparison
+            files_for_perceptual.extend(paths);
             continue;
         }
 
-        let (exact_groups, non_duplicates) = find_exact_duplicates(&paths, &mut errors);
-        groups.extend(exact_groups);
-        remaining_files.extend(non_duplicates);
+        let (groups, non_duplicates) = find_exact_duplicates(&paths, &mut errors);
+
+        // Add one representative from each exact duplicate group for perceptual comparison
+        for group in &groups {
+            if let Some(representative) = group.files.first() {
+                files_for_perceptual.push(representative.clone());
+            }
+        }
+
+        exact_groups.extend(groups);
+        files_for_perceptual.extend(non_duplicates);
     }
 
-    // Pass 3: Perceptual hash comparison for remaining files
+    // Pass 3: Perceptual hash comparison
     log::debug!("Pass 3: Finding perceptual duplicates");
-    let perceptual_groups = find_perceptual_duplicates(&remaining_files, &mut errors);
-    groups.extend(perceptual_groups);
+    let perceptual_groups = find_perceptual_duplicates(&files_for_perceptual, &mut errors);
+
+    // Merge perceptual groups with exact groups where they overlap
+    let final_groups = merge_groups(exact_groups, perceptual_groups);
 
     log::info!(
         "Duplicate detection complete: {} groups found",
-        groups.len()
+        final_groups.len()
     );
 
     Ok(DuplicateReport {
-        groups,
+        groups: final_groups,
         total_files,
         errors,
     })
+}
+
+/// Merges exact and perceptual groups, expanding exact groups when their
+/// representative is found in a perceptual group.
+fn merge_groups(
+    exact_groups: Vec<DuplicateGroup>,
+    perceptual_groups: Vec<DuplicateGroup>,
+) -> Vec<DuplicateGroup> {
+    let mut final_groups: Vec<DuplicateGroup> = Vec::new();
+
+    // Build a map from file path to exact group index
+    let mut file_to_exact_group: HashMap<PathBuf, usize> = HashMap::new();
+    for (idx, group) in exact_groups.iter().enumerate() {
+        for file in &group.files {
+            file_to_exact_group.insert(file.clone(), idx);
+        }
+    }
+
+    // Track which exact groups have been merged
+    let mut merged_exact_groups: Vec<bool> = vec![false; exact_groups.len()];
+
+    // Process perceptual groups
+    for perceptual_group in perceptual_groups {
+        let mut merged_files: Vec<PathBuf> = Vec::new();
+        let mut has_exact_duplicates = false;
+
+        for file in perceptual_group.files {
+            if let Some(&exact_idx) = file_to_exact_group.get(&file) {
+                // This file is part of an exact group, include all files from that group
+                if !merged_exact_groups[exact_idx] {
+                    merged_files.extend(exact_groups[exact_idx].files.clone());
+                    merged_exact_groups[exact_idx] = true;
+                    has_exact_duplicates = true;
+                }
+            } else {
+                merged_files.push(file);
+            }
+        }
+
+        if merged_files.len() > 1 {
+            // Deduplicate in case of overlaps
+            merged_files.sort();
+            merged_files.dedup();
+
+            final_groups.push(DuplicateGroup {
+                files: merged_files,
+                // If it contains exact duplicates, mark as perceptual since it's a mixed group
+                duplicate_type: if has_exact_duplicates {
+                    DuplicateType::Perceptual
+                } else {
+                    DuplicateType::Perceptual
+                },
+            });
+        }
+    }
+
+    // Add remaining exact groups that weren't merged
+    for (idx, group) in exact_groups.into_iter().enumerate() {
+        if !merged_exact_groups[idx] {
+            final_groups.push(group);
+        }
+    }
+
+    final_groups
 }
 
 /// Groups files by their size.
