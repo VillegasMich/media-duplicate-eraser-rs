@@ -1,0 +1,2 @@
+This is duplicate content.
+Both duplicate_a.txt and duplicate_b.txt have the same content.

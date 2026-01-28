@@ -1,6 +1,4 @@
 mod cli;
-pub mod commands;
-mod error;
 mod logger;
 
 fn main() {

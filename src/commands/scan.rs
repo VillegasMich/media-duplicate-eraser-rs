@@ -4,6 +4,7 @@ use walkdir::WalkDir;
 
 use super::Command;
 use crate::error::{Error, Result};
+use crate::services::duplicate::{self, DuplicateType};
 
 pub struct Scanner {
     paths: Vec<PathBuf>,
@@ -32,13 +33,76 @@ impl Command for Scanner {
         );
 
         let files = list_files(&self.paths, self.recursive, self.include_hidden)?;
+        log::info!("Found {} files to analyze", files.len());
 
-        log::info!("Found {} files", files.len());
-        for file in &files {
-            println!("{}", file.display());
+        if files.is_empty() {
+            println!("No files found to scan.");
+            return Ok(());
         }
 
+        println!("Scanning {} files for duplicates...", files.len());
+
+        let report = duplicate::find_duplicates(&files)?;
+
+        print_report(&report);
+
         Ok(())
+    }
+}
+
+fn print_report(report: &duplicate::DuplicateReport) {
+    println!();
+    println!("=== Duplicate Detection Report ===");
+    println!("Total files scanned: {}", report.total_files);
+    println!("Errors encountered: {}", report.errors);
+    println!();
+
+    if report.groups.is_empty() {
+        println!("No duplicates found.");
+        return;
+    }
+
+    let exact_count = report.exact_duplicate_count();
+    let perceptual_count = report.perceptual_duplicate_count();
+
+    println!(
+        "Found {} duplicate groups ({} exact, {} perceptual)",
+        report.groups.len(),
+        report
+            .groups
+            .iter()
+            .filter(|g| g.duplicate_type == DuplicateType::Exact)
+            .count(),
+        report
+            .groups
+            .iter()
+            .filter(|g| g.duplicate_type == DuplicateType::Perceptual)
+            .count()
+    );
+    println!(
+        "Total duplicate files: {} ({} exact, {} perceptual)",
+        report.duplicate_count(),
+        exact_count,
+        perceptual_count
+    );
+    println!();
+
+    for (i, group) in report.groups.iter().enumerate() {
+        let type_label = match group.duplicate_type {
+            DuplicateType::Exact => "EXACT",
+            DuplicateType::Perceptual => "SIMILAR",
+        };
+
+        println!(
+            "Group {} [{}] - {} files:",
+            i + 1,
+            type_label,
+            group.files.len()
+        );
+        for file in &group.files {
+            println!("  {}", file.display());
+        }
+        println!();
     }
 }
 

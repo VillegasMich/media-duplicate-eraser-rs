@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 
-use crate::commands::scan::Scanner;
-use crate::commands::Command;
-use crate::error::Result;
+use media_duplicate_eraser_rs::commands::scan::Scanner;
+use media_duplicate_eraser_rs::commands::Command;
+use media_duplicate_eraser_rs::error::Result;
+
 use crate::logger;
 
 #[derive(Parser)]

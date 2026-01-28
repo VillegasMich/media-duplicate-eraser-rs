@@ -14,3 +14,9 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 walkdir = "2"
+sha2 = "0.10"
+image_hasher = "2"
+image = "0.25"
+
+[dev-dependencies]
+tempfile = "3"
