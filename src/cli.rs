@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::commands::scan::Scanner;
+use crate::commands::Command;
 use crate::error::Result;
 use crate::logger;
 
@@ -30,6 +32,10 @@ pub enum Commands {
         /// Perform recursive scan
         #[arg(short, long, default_value_t = true)]
         recursive: bool,
+
+        /// Include hidden files (starting with '.')
+        #[arg(long)]
+        include_hidden: bool,
     },
 }
 
@@ -38,15 +44,13 @@ pub fn run() -> Result<()> {
 
     logger::init(cli.verbose, cli.quiet);
 
-    match cli.command {
-        Commands::Scan { paths, recursive } => {
-            log::info!("Starting scan of {} directories", paths.len());
-            log::debug!("Paths: {:?}, recursive: {}", paths, recursive);
+    let command: Box<dyn Command> = match cli.command {
+        Commands::Scan {
+            paths,
+            recursive,
+            include_hidden,
+        } => Box::new(Scanner::new(paths, recursive, include_hidden)),
+    };
 
-            // TODO: Implement scan logic
-            println!("Scanning directories: {:?}", paths);
-        }
-    }
-
-    Ok(())
+    command.execute()
 }
