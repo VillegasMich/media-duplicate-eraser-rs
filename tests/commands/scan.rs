@@ -4,7 +4,7 @@ use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
 use media_duplicate_eraser_rs::services::duplicate::{self, DuplicateType};
 
-use crate::common::{fixture_path, text_fixtures_dir};
+use crate::common::{fixture_path, temp_dir, text_fixtures_dir};
 
 #[test]
 fn test_scan_detects_exact_duplicates() {
@@ -101,8 +101,11 @@ fn test_scan_reports_correct_counts() {
 
 #[test]
 fn test_scanner_executes_without_error() {
-    let scanner = Scanner::new(vec![text_fixtures_dir()], true, false);
+    let tmp = temp_dir();
+    let output = tmp.path().join("duplicates.json");
+    let scanner = Scanner::new(vec![text_fixtures_dir()], true, false, output.clone());
     let result = scanner.execute();
 
     assert!(result.is_ok(), "Scanner should execute without error");
+    assert!(output.exists(), "Duplicates file should be created");
 }

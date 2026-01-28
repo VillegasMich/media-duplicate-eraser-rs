@@ -28,6 +28,10 @@ pub enum Error {
     #[error("Directory traversal error: {0}")]
     WalkDir(#[from] walkdir::Error),
 
+    /// An error occurred while parsing or writing JSON.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// The specified path does not exist.
     #[error("Path not found: {0}")]
     PathNotFound(PathBuf),

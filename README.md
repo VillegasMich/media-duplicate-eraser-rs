@@ -130,6 +130,13 @@ tests/
 cargo test
 ```
 
+## TODO
+
+- [ ] `erase` command to delete all duplicate files marked by the scan
+- [ ] Support for more media types (videos and audio)
+- [ ] Publish to [crates.io](https://crates.io)
+- [ ] Implement CI/CD for contributions
+
 ## License
 
 MIT

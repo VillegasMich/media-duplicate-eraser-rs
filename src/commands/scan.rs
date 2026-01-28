@@ -4,20 +4,22 @@ use walkdir::WalkDir;
 
 use super::Command;
 use crate::error::{Error, Result};
-use crate::services::duplicate::{self, DuplicateType};
+use crate::services::duplicate::{self, DuplicateType, DuplicatesFile};
 
 pub struct Scanner {
     paths: Vec<PathBuf>,
     recursive: bool,
     include_hidden: bool,
+    output: PathBuf,
 }
 
 impl Scanner {
-    pub fn new(paths: Vec<PathBuf>, recursive: bool, include_hidden: bool) -> Self {
+    pub fn new(paths: Vec<PathBuf>, recursive: bool, include_hidden: bool, output: PathBuf) -> Self {
         Self {
             paths,
             recursive,
             include_hidden,
+            output,
         }
     }
 }
@@ -26,10 +28,11 @@ impl Command for Scanner {
     fn execute(&self) -> Result<()> {
         log::info!("Starting scan of {} directories", self.paths.len());
         log::debug!(
-            "Paths: {:?}, recursive: {}, include_hidden: {}",
+            "Paths: {:?}, recursive: {}, include_hidden: {}, output: {:?}",
             self.paths,
             self.recursive,
-            self.include_hidden
+            self.include_hidden,
+            self.output
         );
 
         let files = list_files(&self.paths, self.recursive, self.include_hidden)?;
@@ -45,6 +48,13 @@ impl Command for Scanner {
         let report = duplicate::find_duplicates(&files)?;
 
         print_report(&report);
+
+        // Save duplicates file if there are duplicates
+        if !report.groups.is_empty() {
+            let duplicates_file = DuplicatesFile::from_report(&report);
+            duplicates_file.save(&self.output)?;
+            println!("Duplicates saved to: {}", self.output.display());
+        }
 
         Ok(())
     }

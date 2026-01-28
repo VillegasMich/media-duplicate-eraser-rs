@@ -5,9 +5,13 @@
 //! 2. **Slow pass**: Perceptual hash comparison (visually similar images)
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use image_hasher::ImageHash;
+use serde::{Deserialize, Serialize};
 
 use super::hasher;
 use crate::error::Result;
@@ -22,12 +26,89 @@ pub struct DuplicateGroup {
 }
 
 /// The type of duplication detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DuplicateType {
     /// Exact byte-for-byte duplicates (same SHA256 hash).
     Exact,
     /// Visually similar images (similar perceptual hash).
     Perceptual,
+}
+
+/// A duplicate entry in the output file.
+/// Contains only the copies to be deleted, not the original.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateEntry {
+    /// The original file to keep.
+    pub original: PathBuf,
+    /// The duplicate files to delete.
+    pub duplicates: Vec<PathBuf>,
+    /// The type of duplication.
+    pub duplicate_type: DuplicateType,
+}
+
+/// The duplicates file structure that will be saved to JSON.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicatesFile {
+    /// Version of the file format.
+    pub version: String,
+    /// Timestamp when the scan was performed.
+    pub scanned_at: DateTime<Utc>,
+    /// Total number of files scanned.
+    pub total_files_scanned: usize,
+    /// Number of duplicate groups found.
+    pub duplicate_groups: usize,
+    /// Total number of duplicate files (to be deleted).
+    pub total_duplicates: usize,
+    /// The duplicate entries.
+    pub entries: Vec<DuplicateEntry>,
+}
+
+impl DuplicatesFile {
+    /// Creates a new DuplicatesFile from a DuplicateReport.
+    pub fn from_report(report: &DuplicateReport) -> Self {
+        let entries: Vec<DuplicateEntry> = report
+            .groups
+            .iter()
+            .map(|group| {
+                let mut files = group.files.clone();
+                // First file is the original to keep
+                let original = files.remove(0);
+                DuplicateEntry {
+                    original,
+                    duplicates: files,
+                    duplicate_type: group.duplicate_type,
+                }
+            })
+            .collect();
+
+        let total_duplicates = entries.iter().map(|e| e.duplicates.len()).sum();
+
+        Self {
+            version: "1.0".to_string(),
+            scanned_at: Utc::now(),
+            total_files_scanned: report.total_files,
+            duplicate_groups: report.groups.len(),
+            total_duplicates,
+            entries,
+        }
+    }
+
+    /// Saves the duplicates file to the specified path.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, self)?;
+        log::info!("Duplicates file saved to {:?}", path);
+        Ok(())
+    }
+
+    /// Loads a duplicates file from the specified path.
+    pub fn load(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let duplicates: DuplicatesFile = serde_json::from_reader(file)?;
+        Ok(duplicates)
+    }
 }
 
 /// Result of duplicate detection.

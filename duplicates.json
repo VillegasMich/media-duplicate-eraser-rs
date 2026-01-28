@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "scanned_at": "2026-01-28T01:50:47.189036Z",
+  "total_files_scanned": 92,
+  "duplicate_groups": 1,
+  "total_duplicates": 1,
+  "entries": [
+    {
+      "original": "/Volumes/HDD-M/BadBo/WhatsApp Image 2026-01-26 at 20.44.08.jpeg",
+      "duplicates": [
+        "/Volumes/HDD-M/BadBo/e1fa01c8-2687-43d6-9cd7-0376cb925c92.JPG"
+      ],
+      "duplicate_type": "perceptual"
+    }
+  ]
+}

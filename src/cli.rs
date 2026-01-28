@@ -37,6 +37,10 @@ pub enum Commands {
         /// Include hidden files (starting with '.')
         #[arg(long)]
         include_hidden: bool,
+
+        /// Output file for duplicates (JSON format)
+        #[arg(short, long, default_value = "duplicates.json")]
+        output: std::path::PathBuf,
     },
 }
 
@@ -50,7 +54,8 @@ pub fn run() -> Result<()> {
             paths,
             recursive,
             include_hidden,
-        } => Box::new(Scanner::new(paths, recursive, include_hidden)),
+            output,
+        } => Box::new(Scanner::new(paths, recursive, include_hidden, output)),
     };
 
     command.execute()
