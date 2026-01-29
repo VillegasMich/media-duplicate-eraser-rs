@@ -26,15 +26,20 @@ The binary will be available at `target/release/mde`.
 
 ## Usage
 
-```bash
-# Scan directories for duplicate files
-mde scan /path/to/photos
+### Scan for duplicates
 
-# Scan multiple directories
-mde scan /path/to/photos /path/to/videos ~/Downloads
+```bash
+# Scan current directory for duplicate files
+mde scan
+
+# Scan a specific directory
+mde scan /path/to/photos
 
 # Include hidden files and directories
 mde scan /path/to/photos --include-hidden
+
+# Specify custom output file
+mde scan /path/to/photos -o duplicates.json
 
 # Increase verbosity (-v for info, -vv for debug)
 mde -v scan /path/to/photos
@@ -42,10 +47,37 @@ mde -vv scan /path/to/photos
 
 # Quiet mode (errors only)
 mde -q scan /path/to/photos
+```
 
-# Show help
+### Erase duplicates
+
+```bash
+# Delete duplicate files listed in duplicates.json (keeps originals)
+mde erase /path/to/photos
+
+# Erase duplicates in current directory
+mde erase
+```
+
+The erase command uses atomic deletion with rollback - either all duplicates are deleted or none are. This protects against partial deletions from interrupted processes.
+
+### Clean up
+
+```bash
+# Remove duplicates.json file from a directory
+mde clean /path/to/photos
+
+# Clean current directory
+mde clean
+```
+
+### Help
+
+```bash
 mde --help
 mde scan --help
+mde erase --help
+mde clean --help
 ```
 
 ## Example Output
@@ -113,7 +145,9 @@ src/
 ├── logger.rs            # Logging configuration
 ├── commands/
 │   ├── mod.rs           # Command trait
-│   └── scan.rs          # Scanner implementation
+│   ├── scan.rs          # Scanner - find duplicates
+│   ├── erase.rs         # Eraser - delete duplicates
+│   └── clean.rs         # Cleaner - remove duplicates.json
 └── services/
     ├── mod.rs           # Services module
     ├── hasher.rs        # SHA-256 and perceptual hashing
@@ -137,6 +171,9 @@ tests/
 | [sha2](https://crates.io/crates/sha2) | SHA-256 hashing |
 | [image_hasher](https://crates.io/crates/image_hasher) | Perceptual hashing |
 | [image](https://crates.io/crates/image) | Image loading |
+| [serde](https://crates.io/crates/serde) | Serialization |
+| [serde_json](https://crates.io/crates/serde_json) | JSON output |
+| [chrono](https://crates.io/crates/chrono) | Timestamps |
 
 ## Running Tests
 
@@ -146,7 +183,8 @@ cargo test
 
 ## TODO
 
-- [ ] `erase` command to delete all duplicate files marked by the scan
+- [x] `erase` command to delete all duplicate files marked by the scan
+- [x] `clean` command to remove duplicates.json file
 - [ ] Support for more media types (videos and audio)
 - [ ] Publish to [crates.io](https://crates.io)
 - [ ] Implement CI/CD for contributions
