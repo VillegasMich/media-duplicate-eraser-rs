@@ -201,6 +201,8 @@ cargo test
 - [ ] Support for more media types (videos and audio)
 - [x] Publish to [crates.io](https://crates.io/crates/media-duplicate-eraser-rs)
 - [ ] Implement CI/CD for contributions
+- [ ] Publish to [Homebrew](https://brew.sh/)
+- [ ] Announce v1.0 release on [r/rust](https://reddit.com/r/rust) and [r/linux](https://reddit.com/r/linux)
 
 ## License
 
