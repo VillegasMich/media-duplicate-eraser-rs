@@ -103,7 +103,7 @@ fn test_scan_reports_correct_counts() {
 fn test_scanner_executes_without_error() {
     let tmp = temp_dir();
     let output = tmp.path().join("duplicates.json");
-    let scanner = Scanner::new(vec![text_fixtures_dir()], true, false, Some(output.clone()));
+    let scanner = Scanner::new(text_fixtures_dir(), true, false, Some(output.clone()));
     let result = scanner.execute();
 
     assert!(result.is_ok(), "Scanner should execute without error");

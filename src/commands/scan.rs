@@ -9,7 +9,7 @@ use crate::services::duplicate::{self, DuplicateType, DuplicatesFile};
 const DEFAULT_OUTPUT_FILENAME: &str = "duplicates.json";
 
 pub struct Scanner {
-    paths: Vec<PathBuf>,
+    path: PathBuf,
     recursive: bool,
     include_hidden: bool,
     output: Option<PathBuf>,
@@ -17,13 +17,13 @@ pub struct Scanner {
 
 impl Scanner {
     pub fn new(
-        paths: Vec<PathBuf>,
+        path: PathBuf,
         recursive: bool,
         include_hidden: bool,
         output: Option<PathBuf>,
     ) -> Self {
         Self {
-            paths,
+            path,
             recursive,
             include_hidden,
             output,
@@ -31,29 +31,26 @@ impl Scanner {
     }
 
     /// Returns the output path for the duplicates file.
-    /// If not specified, defaults to duplicates.json in the first scanned directory.
+    /// If not specified, defaults to duplicates.json in the scanned directory.
     fn output_path(&self) -> PathBuf {
-        self.output.clone().unwrap_or_else(|| {
-            self.paths
-                .first()
-                .map(|p| p.join(DEFAULT_OUTPUT_FILENAME))
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_FILENAME))
-        })
+        self.output
+            .clone()
+            .unwrap_or_else(|| self.path.join(DEFAULT_OUTPUT_FILENAME))
     }
 }
 
 impl Command for Scanner {
     fn execute(&self) -> Result<()> {
-        log::info!("Starting scan of {} directories", self.paths.len());
+        log::info!("Starting scan of directory: {:?}", self.path);
         log::debug!(
-            "Paths: {:?}, recursive: {}, include_hidden: {}, output: {:?}",
-            self.paths,
+            "Path: {:?}, recursive: {}, include_hidden: {}, output: {:?}",
+            self.path,
             self.recursive,
             self.include_hidden,
             self.output
         );
 
-        let files = list_files(&self.paths, self.recursive, self.include_hidden)?;
+        let files = list_files(&self.path, self.recursive, self.include_hidden)?;
         log::info!("Found {} files to analyze", files.len());
 
         if files.is_empty() {
@@ -137,34 +134,28 @@ fn print_report(report: &duplicate::DuplicateReport) {
 
 // Utils
 
-fn list_files(
-    paths: &[PathBuf],
-    recursive: bool,
-    include_hidden: bool,
-) -> Result<Vec<PathBuf>> {
+fn list_files(path: &PathBuf, recursive: bool, include_hidden: bool) -> Result<Vec<PathBuf>> {
+    if !path.exists() {
+        return Err(Error::PathNotFound(path.clone()));
+    }
+
     let mut files = Vec::new();
 
-    for path in paths {
-        if !path.exists() {
-            return Err(Error::PathNotFound(path.clone()));
-        }
+    let walker = if recursive {
+        WalkDir::new(path)
+    } else {
+        WalkDir::new(path).max_depth(1)
+    };
 
-        let walker = if recursive {
-            WalkDir::new(path)
-        } else {
-            WalkDir::new(path).max_depth(1)
-        };
+    let walker = walker
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || include_hidden || !is_hidden(e));
 
-        let walker = walker
-            .into_iter()
-            .filter_entry(|e| e.depth() == 0 || include_hidden || !is_hidden(e));
+    for entry in walker {
+        let entry = entry?;
 
-        for entry in walker {
-            let entry = entry?;
-
-            if entry.file_type().is_file() {
-                files.push(entry.into_path());
-            }
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
         }
     }
 

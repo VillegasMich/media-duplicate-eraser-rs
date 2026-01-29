@@ -26,11 +26,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Scan directories for duplicate media files
+    /// Scan a directory for duplicate media files
     Scan {
-        /// Directories to scan for duplicates
-        #[arg(required = true)]
-        paths: Vec<std::path::PathBuf>,
+        /// Directory to scan for duplicates
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
 
         /// Perform recursive scan
         #[arg(short, long, default_value_t = true)]
@@ -67,11 +67,11 @@ pub fn run() -> Result<()> {
 
     let command: Box<dyn Command> = match cli.command {
         Commands::Scan {
-            paths,
+            path,
             recursive,
             include_hidden,
             output,
-        } => Box::new(Scanner::new(paths, recursive, include_hidden, output)),
+        } => Box::new(Scanner::new(path, recursive, include_hidden, output)),
         Commands::Clean { path } => Box::new(Cleaner::new(path)),
         Commands::Erase { path } => Box::new(Eraser::new(path)),
     };
