@@ -3,6 +3,10 @@ name = "media-duplicate-eraser-rs"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "CLI tool to find and remove duplicate media files using SHA-256 and perceptual hashing"
+repository = "https://github.com/mvillegas/media-duplicate-eraser-rs"
+keywords = ["duplicate", "media", "images", "cli", "deduplication"]
+categories = ["command-line-utilities", "filesystem"]
 default-run = "mde"
 
 [[bin]]
@@ -21,6 +25,8 @@ image = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+indicatif = "0.17"
+console = "0.15"
 
 [dev-dependencies]
 tempfile = "3"

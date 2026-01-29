@@ -1,18 +1,26 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 
 use super::Command;
 use crate::error::{Error, Result};
-use crate::services::duplicate::{self, DuplicateType, DuplicatesFile};
+use crate::services::duplicate::{self, DuplicateType, DuplicatesFile, ProgressCallback};
 
 const DEFAULT_OUTPUT_FILENAME: &str = "duplicates.json";
+
+// Styled output prefixes (Classic ASCII)
+const SUCCESS_PREFIX: &str = "[OK]";
+const INFO_PREFIX: &str = "[*]";
 
 pub struct Scanner {
     path: PathBuf,
     recursive: bool,
     include_hidden: bool,
     output: Option<PathBuf>,
+    quiet: bool,
 }
 
 impl Scanner {
@@ -21,12 +29,14 @@ impl Scanner {
         recursive: bool,
         include_hidden: bool,
         output: Option<PathBuf>,
+        quiet: bool,
     ) -> Self {
         Self {
             path,
             recursive,
             include_hidden,
             output,
+            quiet,
         }
     }
 
@@ -50,80 +60,163 @@ impl Command for Scanner {
             self.output
         );
 
+        // Spinner for file collection
+        let spinner = if !self.quiet {
+            let sp = ProgressBar::new_spinner();
+            sp.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap(),
+            );
+            sp.set_message("Collecting files...");
+            sp.enable_steady_tick(std::time::Duration::from_millis(100));
+            Some(sp)
+        } else {
+            None
+        };
+
         let files = list_files(&self.path, self.recursive, self.include_hidden)?;
+
+        if let Some(sp) = spinner {
+            sp.finish_with_message(format!(
+                "{} Found {} files",
+                style(SUCCESS_PREFIX).green().bold(),
+                style(files.len()).cyan()
+            ));
+        }
+
         log::info!("Found {} files to analyze", files.len());
 
         if files.is_empty() {
-            println!("No files found to scan.");
+            if !self.quiet {
+                println!(
+                    "{} No files found to scan.",
+                    style(INFO_PREFIX).blue().bold()
+                );
+            }
             return Ok(());
         }
 
-        println!("Scanning {} files for duplicates...", files.len());
+        // Progress bar for duplicate detection
+        let progress_bar = if !self.quiet {
+            let pb = ProgressBar::new(files.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            pb.set_message("Scanning...");
+            Some(pb)
+        } else {
+            None
+        };
 
-        let report = duplicate::find_duplicates(&files)?;
+        // Create progress callback
+        let progress_callback: Option<ProgressCallback> = if let Some(ref pb) = progress_bar {
+            let pb_clone = pb.clone();
+            let last_msg = Arc::new(Mutex::new(String::new()));
+            Some(Box::new(move |current, _total, phase| {
+                pb_clone.set_position(current as u64);
+                let mut last = last_msg.lock().unwrap();
+                if *last != phase {
+                    pb_clone.set_message(phase.to_string());
+                    *last = phase.to_string();
+                }
+            }))
+        } else {
+            None
+        };
 
-        print_report(&report);
+        let report = duplicate::find_duplicates_with_progress(&files, progress_callback)?;
+
+        if let Some(pb) = progress_bar {
+            pb.finish_and_clear();
+        }
+
+        print_report(&report, self.quiet);
 
         // Save duplicates file if there are duplicates
         if !report.groups.is_empty() {
             let output_path = self.output_path();
             let duplicates_file = DuplicatesFile::from_report(&report);
             duplicates_file.save(&output_path)?;
-            println!("Duplicates saved to: {}", output_path.display());
+            if !self.quiet {
+                println!(
+                    "{} Duplicates saved to: {}",
+                    style(SUCCESS_PREFIX).green().bold(),
+                    style(output_path.display()).cyan()
+                );
+            }
         }
 
         Ok(())
     }
 }
 
-fn print_report(report: &duplicate::DuplicateReport) {
+fn print_report(report: &duplicate::DuplicateReport, quiet: bool) {
+    if quiet {
+        return;
+    }
+
     println!();
-    println!("=== Duplicate Detection Report ===");
-    println!("Total files scanned: {}", report.total_files);
+    println!(
+        "{}",
+        style("=== Duplicate Detection Report ===").bold().cyan()
+    );
+    println!(
+        "Total files scanned: {}",
+        style(report.total_files).cyan()
+    );
     println!("Errors encountered: {}", report.errors);
     println!();
 
     if report.groups.is_empty() {
-        println!("No duplicates found.");
+        println!(
+            "{} No duplicates found.",
+            style(SUCCESS_PREFIX).green().bold()
+        );
         return;
     }
 
     let exact_count = report.exact_duplicate_count();
     let perceptual_count = report.perceptual_duplicate_count();
+    let exact_groups = report
+        .groups
+        .iter()
+        .filter(|g| g.duplicate_type == DuplicateType::Exact)
+        .count();
+    let perceptual_groups = report
+        .groups
+        .iter()
+        .filter(|g| g.duplicate_type == DuplicateType::Perceptual)
+        .count();
 
     println!(
         "Found {} duplicate groups ({} exact, {} perceptual)",
-        report.groups.len(),
-        report
-            .groups
-            .iter()
-            .filter(|g| g.duplicate_type == DuplicateType::Exact)
-            .count(),
-        report
-            .groups
-            .iter()
-            .filter(|g| g.duplicate_type == DuplicateType::Perceptual)
-            .count()
+        style(report.groups.len()).cyan().bold(),
+        style(exact_groups).cyan(),
+        style(perceptual_groups).yellow()
     );
     println!(
         "Total duplicate files: {} ({} exact, {} perceptual)",
-        report.duplicate_count(),
-        exact_count,
-        perceptual_count
+        style(report.duplicate_count()).cyan().bold(),
+        style(exact_count).cyan(),
+        style(perceptual_count).yellow()
     );
     println!();
 
     for (i, group) in report.groups.iter().enumerate() {
         let type_label = match group.duplicate_type {
-            DuplicateType::Exact => "EXACT",
-            DuplicateType::Perceptual => "SIMILAR",
+            DuplicateType::Exact => style("[EXACT]").cyan().bold(),
+            DuplicateType::Perceptual => style("[SIMILAR]").yellow().bold(),
         };
 
         println!(
-            "Group {} [{}] - {} files:",
-            i + 1,
+            "Group {} {} - {} files:",
+            style(i + 1).bold(),
             type_label,
-            group.files.len()
+            style(group.files.len()).bold()
         );
         for file in &group.files {
             println!("  {}", file.display());

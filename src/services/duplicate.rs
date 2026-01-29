@@ -150,8 +150,20 @@ impl DuplicateReport {
     }
 }
 
+/// Progress callback for duplicate detection.
+/// Called with (current_file_index, total_files, phase_name).
+pub type ProgressCallback = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
+
 /// Finds duplicate images using a two-pass approach.
 pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
+    find_duplicates_with_progress(files, None)
+}
+
+/// Finds duplicate images using a two-pass approach with optional progress callback.
+pub fn find_duplicates_with_progress(
+    files: &[PathBuf],
+    progress: Option<ProgressCallback>,
+) -> Result<DuplicateReport> {
     let mut exact_groups: Vec<DuplicateGroup> = Vec::new();
     let mut errors = 0;
     let total_files = files.len();
@@ -165,15 +177,21 @@ pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
     // Pass 2: Within each size group, find exact duplicates by SHA256
     log::debug!("Pass 2: Finding exact duplicates by SHA256");
     let mut files_for_perceptual: Vec<PathBuf> = Vec::new();
+    let mut processed = 0;
 
     for (_size, paths) in size_groups {
         if paths.len() < 2 {
             // Only one file with this size, still needs perceptual comparison
-            files_for_perceptual.extend(paths);
+            files_for_perceptual.extend(paths.clone());
+            processed += paths.len();
+            if let Some(cb) = progress.as_ref() {
+                cb(processed, total_files, "Hashing files");
+            }
             continue;
         }
 
-        let (groups, non_duplicates) = find_exact_duplicates(&paths, &mut errors);
+        let (groups, non_duplicates) =
+            find_exact_duplicates_with_progress(&paths, &mut errors, &progress, &mut processed, total_files);
 
         // Add one representative from each exact duplicate group for perceptual comparison
         for group in &groups {
@@ -188,7 +206,8 @@ pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
 
     // Pass 3: Perceptual hash comparison
     log::debug!("Pass 3: Finding perceptual duplicates");
-    let perceptual_groups = find_perceptual_duplicates(&files_for_perceptual, &mut errors);
+    let perceptual_groups =
+        find_perceptual_duplicates_with_progress(&files_for_perceptual, &mut errors, &progress);
 
     // Merge perceptual groups with exact groups where they overlap
     let final_groups = merge_groups(exact_groups, perceptual_groups);
@@ -288,11 +307,13 @@ fn group_by_size(files: &[PathBuf], errors: &mut usize) -> HashMap<u64, Vec<Path
     size_map
 }
 
-/// Finds exact duplicates within a group of files using SHA256.
-/// Returns (duplicate groups, files that are not exact duplicates).
-fn find_exact_duplicates(
+/// Finds exact duplicates with progress reporting.
+fn find_exact_duplicates_with_progress(
     files: &[PathBuf],
     errors: &mut usize,
+    progress: &Option<ProgressCallback>,
+    processed: &mut usize,
+    total: usize,
 ) -> (Vec<DuplicateGroup>, Vec<PathBuf>) {
     let mut hash_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
@@ -305,6 +326,10 @@ fn find_exact_duplicates(
                 log::warn!("Could not hash {:?}: {}", path, e);
                 *errors += 1;
             }
+        }
+        *processed += 1;
+        if let Some(cb) = progress {
+            cb(*processed, total, "Hashing files");
         }
     }
 
@@ -325,12 +350,17 @@ fn find_exact_duplicates(
     (groups, non_duplicates)
 }
 
-/// Finds perceptually similar images.
-fn find_perceptual_duplicates(files: &[PathBuf], errors: &mut usize) -> Vec<DuplicateGroup> {
+/// Finds perceptually similar images with progress reporting.
+fn find_perceptual_duplicates_with_progress(
+    files: &[PathBuf],
+    errors: &mut usize,
+    progress: &Option<ProgressCallback>,
+) -> Vec<DuplicateGroup> {
     // Compute perceptual hashes for all files
     let mut hashes: Vec<(PathBuf, ImageHash)> = Vec::new();
+    let total = files.len();
 
-    for path in files {
+    for (i, path) in files.iter().enumerate() {
         match hasher::perceptual_hash(path) {
             Ok(Some(hash)) => {
                 hashes.push((path.clone(), hash));
@@ -343,6 +373,9 @@ fn find_perceptual_duplicates(files: &[PathBuf], errors: &mut usize) -> Vec<Dupl
                 log::warn!("Could not compute perceptual hash for {:?}: {}", path, e);
                 *errors += 1;
             }
+        }
+        if let Some(cb) = progress {
+            cb(i + 1, total, "Analyzing images");
         }
     }
 

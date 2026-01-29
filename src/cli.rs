@@ -71,9 +71,9 @@ pub fn run() -> Result<()> {
             recursive,
             include_hidden,
             output,
-        } => Box::new(Scanner::new(path, recursive, include_hidden, output)),
-        Commands::Clean { path } => Box::new(Cleaner::new(path)),
-        Commands::Erase { path } => Box::new(Eraser::new(path)),
+        } => Box::new(Scanner::new(path, recursive, include_hidden, output, cli.quiet)),
+        Commands::Clean { path } => Box::new(Cleaner::new(path, cli.quiet)),
+        Commands::Erase { path } => Box::new(Eraser::new(path, cli.quiet)),
     };
 
     command.execute()
