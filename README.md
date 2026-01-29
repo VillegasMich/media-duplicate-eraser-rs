@@ -27,13 +27,33 @@ A CLI tool to find and remove duplicate media files.
 cargo install media-duplicate-eraser-rs
 ```
 
+The binary will be installed to `~/.cargo/bin/mde`. Make sure `~/.cargo/bin` is in your PATH:
+
+```bash
+# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+### From Homebrew
+
+```bash
+# Coming soon
+brew install mde
+```
+
 ### From source
 
 ```bash
+git clone https://github.com/mvillegas/media-duplicate-eraser-rs.git
+cd media-duplicate-eraser-rs
 cargo build --release
-```
 
-The binary will be available at `target/release/mde`.
+# Option 1: Copy to a directory in your PATH
+sudo cp target/release/mde /usr/local/bin/
+
+# Option 2: Add target/release to your PATH
+export PATH="$PWD/target/release:$PATH"
+```
 
 ## Usage
 
@@ -93,8 +113,13 @@ mde clean --help
 
 ## Example Output
 
+### Scan Command
+
 ```
-Scanning 150 files for duplicates...
+⠋ Collecting files...
+[OK] Found 150 files
+
+⠹ [========================================] 150/150 Analyzing images
 
 === Duplicate Detection Report ===
 Total files scanned: 150
@@ -111,6 +136,28 @@ Group 1 [EXACT] - 3 files:
 Group 2 [SIMILAR] - 2 files:
   /photos/sunset.jpg
   /photos/sunset_edited.jpg
+
+[OK] Duplicates saved to: /photos/duplicates.json
+```
+
+### Erase Command
+
+```
+[*] Found 5 duplicate files to erase from 3 groups.
+⠋ Validating files...
+[!] 1 files no longer exist and will be skipped.
+
+⠹ [========================================] 4/4 Staging files...
+⠋ Finalizing deletion...
+
+[OK] Successfully erased 4 duplicate files.
+[OK] Removed: /photos/duplicates.json
+```
+
+### Clean Command
+
+```
+[OK] Removed: /photos/duplicates.json
 ```
 
 ## How Duplicate Detection Works
