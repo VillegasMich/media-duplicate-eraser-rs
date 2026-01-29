@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use media_duplicate_eraser_rs::commands::clean::Cleaner;
 use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
 use media_duplicate_eraser_rs::error::Result;
@@ -38,9 +39,16 @@ pub enum Commands {
         #[arg(long)]
         include_hidden: bool,
 
-        /// Output file for duplicates (JSON format)
-        #[arg(short, long, default_value = "duplicates.json")]
-        output: std::path::PathBuf,
+        /// Output file for duplicates (JSON format). Defaults to duplicates.json in the first scanned directory.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+
+    /// Remove duplicates.json file from a directory
+    Clean {
+        /// Directory containing duplicates.json to remove
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
     },
 }
 
@@ -56,6 +64,7 @@ pub fn run() -> Result<()> {
             include_hidden,
             output,
         } => Box::new(Scanner::new(paths, recursive, include_hidden, output)),
+        Commands::Clean { path } => Box::new(Cleaner::new(path)),
     };
 
     command.execute()

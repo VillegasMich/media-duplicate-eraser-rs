@@ -1,3 +1,4 @@
+pub mod clean;
 pub mod scan;
 
 use crate::error::Result;

@@ -6,21 +6,39 @@ use super::Command;
 use crate::error::{Error, Result};
 use crate::services::duplicate::{self, DuplicateType, DuplicatesFile};
 
+const DEFAULT_OUTPUT_FILENAME: &str = "duplicates.json";
+
 pub struct Scanner {
     paths: Vec<PathBuf>,
     recursive: bool,
     include_hidden: bool,
-    output: PathBuf,
+    output: Option<PathBuf>,
 }
 
 impl Scanner {
-    pub fn new(paths: Vec<PathBuf>, recursive: bool, include_hidden: bool, output: PathBuf) -> Self {
+    pub fn new(
+        paths: Vec<PathBuf>,
+        recursive: bool,
+        include_hidden: bool,
+        output: Option<PathBuf>,
+    ) -> Self {
         Self {
             paths,
             recursive,
             include_hidden,
             output,
         }
+    }
+
+    /// Returns the output path for the duplicates file.
+    /// If not specified, defaults to duplicates.json in the first scanned directory.
+    fn output_path(&self) -> PathBuf {
+        self.output.clone().unwrap_or_else(|| {
+            self.paths
+                .first()
+                .map(|p| p.join(DEFAULT_OUTPUT_FILENAME))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_FILENAME))
+        })
     }
 }
 
@@ -51,9 +69,10 @@ impl Command for Scanner {
 
         // Save duplicates file if there are duplicates
         if !report.groups.is_empty() {
+            let output_path = self.output_path();
             let duplicates_file = DuplicatesFile::from_report(&report);
-            duplicates_file.save(&self.output)?;
-            println!("Duplicates saved to: {}", self.output.display());
+            duplicates_file.save(&output_path)?;
+            println!("Duplicates saved to: {}", output_path.display());
         }
 
         Ok(())
