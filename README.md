@@ -16,7 +16,18 @@
 
 A CLI tool to find and remove duplicate media files.
 
+[![Crates.io](https://img.shields.io/crates/v/media-duplicate-eraser-rs.svg)](https://crates.io/crates/media-duplicate-eraser-rs)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ## Installation
+
+### From crates.io (recommended)
+
+```bash
+cargo install media-duplicate-eraser-rs
+```
+
+### From source
 
 ```bash
 cargo build --release
@@ -174,6 +185,8 @@ tests/
 | [serde](https://crates.io/crates/serde) | Serialization |
 | [serde_json](https://crates.io/crates/serde_json) | JSON output |
 | [chrono](https://crates.io/crates/chrono) | Timestamps |
+| [indicatif](https://crates.io/crates/indicatif) | Progress bars and spinners |
+| [console](https://crates.io/crates/console) | Styled terminal output |
 
 ## Running Tests
 
@@ -186,7 +199,7 @@ cargo test
 - [x] `erase` command to delete all duplicate files marked by the scan
 - [x] `clean` command to remove duplicates.json file
 - [ ] Support for more media types (videos and audio)
-- [ ] Publish to [crates.io](https://crates.io)
+- [x] Publish to [crates.io](https://crates.io/crates/media-duplicate-eraser-rs)
 - [ ] Implement CI/CD for contributions
 
 ## License
