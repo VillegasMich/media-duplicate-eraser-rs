@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use media_duplicate_eraser_rs::commands::clean::Cleaner;
+use media_duplicate_eraser_rs::commands::erase::Eraser;
 use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
 use media_duplicate_eraser_rs::error::Result;
@@ -50,6 +51,13 @@ pub enum Commands {
         #[arg(default_value = ".")]
         path: std::path::PathBuf,
     },
+
+    /// Delete duplicate files listed in duplicates.json (atomic operation)
+    Erase {
+        /// Directory containing duplicates.json
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -65,6 +73,7 @@ pub fn run() -> Result<()> {
             output,
         } => Box::new(Scanner::new(paths, recursive, include_hidden, output)),
         Commands::Clean { path } => Box::new(Cleaner::new(path)),
+        Commands::Erase { path } => Box::new(Eraser::new(path)),
     };
 
     command.execute()
