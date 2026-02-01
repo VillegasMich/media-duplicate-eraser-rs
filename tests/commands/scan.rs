@@ -2,7 +2,7 @@
 
 use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
-use media_duplicate_eraser_rs::services::duplicate::{self, DuplicateType};
+use media_duplicate_eraser_rs::services::duplicate::{self, DuplicateType, MediaFilter};
 
 use crate::common::{fixture_path, images_fixtures_dir, temp_dir, text_fixtures_dir};
 
@@ -103,7 +103,7 @@ fn test_scan_reports_correct_counts() {
 fn test_scanner_executes_without_error() {
     let tmp = temp_dir();
     let output = tmp.path().join("duplicates.json");
-    let scanner = Scanner::new(text_fixtures_dir(), true, false, Some(output.clone()), true);
+    let scanner = Scanner::new(text_fixtures_dir(), true, false, Some(output.clone()), true, MediaFilter::All);
     let result = scanner.execute();
 
     assert!(result.is_ok(), "Scanner should execute without error");
@@ -216,7 +216,7 @@ fn test_scan_image_reports_correct_counts() {
 fn test_scanner_executes_on_images_without_error() {
     let tmp = temp_dir();
     let output = tmp.path().join("duplicates.json");
-    let scanner = Scanner::new(images_fixtures_dir(), false, false, Some(output.clone()), true);
+    let scanner = Scanner::new(images_fixtures_dir(), false, false, Some(output.clone()), true, MediaFilter::All);
     let result = scanner.execute();
 
     assert!(result.is_ok(), "Scanner should execute on images without error");
@@ -265,7 +265,7 @@ fn test_scan_mixed_files_in_directory() {
     }
 
     // Scan recursively
-    let scanner = Scanner::new(tmp.path().to_path_buf(), true, false, Some(output.clone()), true);
+    let scanner = Scanner::new(tmp.path().to_path_buf(), true, false, Some(output.clone()), true, MediaFilter::All);
     let result = scanner.execute();
 
     assert!(result.is_ok(), "Scanner should handle mixed file types");

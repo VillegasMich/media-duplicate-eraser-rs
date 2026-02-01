@@ -1,8 +1,8 @@
 //! Duplicate detection service.
 //!
-//! Implements a two-pass approach for finding duplicate images:
+//! Implements a two-pass approach for finding duplicate media files:
 //! 1. **Fast pass**: Group by file size, then SHA256 hash (exact duplicates)
-//! 2. **Slow pass**: Perceptual hash comparison (visually similar images)
+//! 2. **Slow pass**: Perceptual hash comparison (visually similar images/videos)
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use image_hasher::ImageHash;
 use serde::{Deserialize, Serialize};
 
-use super::hasher;
+use super::hasher::{self, MediaType};
 use crate::error::Result;
 
 /// Represents a group of duplicate files.
@@ -31,8 +31,42 @@ pub struct DuplicateGroup {
 pub enum DuplicateType {
     /// Exact byte-for-byte duplicates (same SHA256 hash).
     Exact,
-    /// Visually similar images (similar perceptual hash).
+    /// Visually similar media (similar perceptual hash).
     Perceptual,
+}
+
+/// Filter for which media types to scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaFilter {
+    /// Scan all supported media types (images and videos).
+    #[default]
+    All,
+    /// Scan only images.
+    ImagesOnly,
+    /// Scan only videos.
+    VideosOnly,
+}
+
+impl MediaFilter {
+    /// Checks if a file should be included based on the filter.
+    pub fn includes(&self, path: &Path) -> bool {
+        let media_type = hasher::get_media_type(path);
+        match self {
+            MediaFilter::All => true,
+            MediaFilter::ImagesOnly => media_type == MediaType::Image,
+            MediaFilter::VideosOnly => media_type == MediaType::Video,
+        }
+    }
+
+    /// Checks if a file should be processed for perceptual hashing based on the filter.
+    pub fn includes_for_perceptual(&self, path: &Path) -> bool {
+        let media_type = hasher::get_media_type(path);
+        match self {
+            MediaFilter::All => media_type == MediaType::Image || media_type == MediaType::Video,
+            MediaFilter::ImagesOnly => media_type == MediaType::Image,
+            MediaFilter::VideosOnly => media_type == MediaType::Video,
+        }
+    }
 }
 
 /// A duplicate entry in the output file.
@@ -154,25 +188,45 @@ impl DuplicateReport {
 /// Called with (current_file_index, total_files, phase_name).
 pub type ProgressCallback = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
 
-/// Finds duplicate images using a two-pass approach.
+/// Finds duplicate media files using a two-pass approach.
 pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
-    find_duplicates_with_progress(files, None)
+    find_duplicates_with_options(files, None, MediaFilter::All)
 }
 
-/// Finds duplicate images using a two-pass approach with optional progress callback.
+/// Finds duplicate media files using a two-pass approach with optional progress callback.
 pub fn find_duplicates_with_progress(
     files: &[PathBuf],
     progress: Option<ProgressCallback>,
 ) -> Result<DuplicateReport> {
+    find_duplicates_with_options(files, progress, MediaFilter::All)
+}
+
+/// Finds duplicate media files with full options.
+pub fn find_duplicates_with_options(
+    files: &[PathBuf],
+    progress: Option<ProgressCallback>,
+    filter: MediaFilter,
+) -> Result<DuplicateReport> {
+    // Filter files based on media type if not scanning all
+    let filtered_files: Vec<PathBuf> = if filter == MediaFilter::All {
+        files.to_vec()
+    } else {
+        files
+            .iter()
+            .filter(|p| filter.includes(p))
+            .cloned()
+            .collect()
+    };
+
     let mut exact_groups: Vec<DuplicateGroup> = Vec::new();
     let mut errors = 0;
-    let total_files = files.len();
+    let total_files = filtered_files.len();
 
     log::info!("Starting duplicate detection for {} files", total_files);
 
     // Pass 1: Group by file size
     log::debug!("Pass 1: Grouping by file size");
-    let size_groups = group_by_size(files, &mut errors);
+    let size_groups = group_by_size(&filtered_files, &mut errors);
 
     // Pass 2: Within each size group, find exact duplicates by SHA256
     log::debug!("Pass 2: Finding exact duplicates by SHA256");
@@ -207,7 +261,7 @@ pub fn find_duplicates_with_progress(
     // Pass 3: Perceptual hash comparison
     log::debug!("Pass 3: Finding perceptual duplicates");
     let perceptual_groups =
-        find_perceptual_duplicates_with_progress(&files_for_perceptual, &mut errors, &progress);
+        find_perceptual_duplicates_with_progress(&files_for_perceptual, &mut errors, &progress, filter);
 
     // Merge perceptual groups with exact groups where they overlap
     let final_groups = merge_groups(exact_groups, perceptual_groups);
@@ -350,24 +404,34 @@ fn find_exact_duplicates_with_progress(
     (groups, non_duplicates)
 }
 
-/// Finds perceptually similar images with progress reporting.
+/// Finds perceptually similar media files with progress reporting.
 fn find_perceptual_duplicates_with_progress(
     files: &[PathBuf],
     errors: &mut usize,
     progress: &Option<ProgressCallback>,
+    filter: MediaFilter,
 ) -> Vec<DuplicateGroup> {
-    // Compute perceptual hashes for all files
+    // Compute perceptual hashes for all supported media files
     let mut hashes: Vec<(PathBuf, ImageHash)> = Vec::new();
     let total = files.len();
 
     for (i, path) in files.iter().enumerate() {
-        match hasher::perceptual_hash(path) {
+        // Check if file should be processed based on filter
+        if !filter.includes_for_perceptual(path) {
+            if let Some(cb) = progress {
+                cb(i + 1, total, "Analyzing media");
+            }
+            continue;
+        }
+
+        // Use the unified media perceptual hash function
+        match hasher::media_perceptual_hash(path) {
             Ok(Some(hash)) => {
                 hashes.push((path.clone(), hash));
             }
             Ok(None) => {
-                // Not an image file, skip
-                log::debug!("Skipping non-image file: {:?}", path);
+                // Not a supported media file, skip
+                log::debug!("Skipping unsupported file: {:?}", path);
             }
             Err(e) => {
                 log::warn!("Could not compute perceptual hash for {:?}: {}", path, e);
@@ -375,11 +439,11 @@ fn find_perceptual_duplicates_with_progress(
             }
         }
         if let Some(cb) = progress {
-            cb(i + 1, total, "Analyzing images");
+            cb(i + 1, total, "Analyzing media");
         }
     }
 
-    // Find similar images using union-find approach
+    // Find similar media using union-find approach
     let mut groups: Vec<DuplicateGroup> = Vec::new();
     let mut used: Vec<bool> = vec![false; hashes.len()];
 

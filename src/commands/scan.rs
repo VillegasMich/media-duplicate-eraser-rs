@@ -7,13 +7,15 @@ use walkdir::WalkDir;
 
 use super::Command;
 use crate::error::{Error, Result};
-use crate::services::duplicate::{self, DuplicateType, DuplicatesFile, ProgressCallback};
+use crate::services::duplicate::{self, DuplicateType, DuplicatesFile, MediaFilter, ProgressCallback};
+use crate::services::hasher;
 
 const DEFAULT_OUTPUT_FILENAME: &str = "duplicates.json";
 
 // Styled output prefixes (Classic ASCII)
 const SUCCESS_PREFIX: &str = "[OK]";
 const INFO_PREFIX: &str = "[*]";
+const WARNING_PREFIX: &str = "[!]";
 
 pub struct Scanner {
     path: PathBuf,
@@ -21,6 +23,7 @@ pub struct Scanner {
     include_hidden: bool,
     output: Option<PathBuf>,
     quiet: bool,
+    media_filter: MediaFilter,
 }
 
 impl Scanner {
@@ -30,6 +33,7 @@ impl Scanner {
         include_hidden: bool,
         output: Option<PathBuf>,
         quiet: bool,
+        media_filter: MediaFilter,
     ) -> Self {
         Self {
             path,
@@ -37,6 +41,7 @@ impl Scanner {
             include_hidden,
             output,
             quiet,
+            media_filter,
         }
     }
 
@@ -53,12 +58,28 @@ impl Command for Scanner {
     fn execute(&self) -> Result<()> {
         log::info!("Starting scan of directory: {:?}", self.path);
         log::debug!(
-            "Path: {:?}, recursive: {}, include_hidden: {}, output: {:?}",
+            "Path: {:?}, recursive: {}, include_hidden: {}, output: {:?}, media_filter: {:?}",
             self.path,
             self.recursive,
             self.include_hidden,
-            self.output
+            self.output,
+            self.media_filter
         );
+
+        // Check if FFmpeg is available for video processing
+        let has_ffmpeg = hasher::is_ffmpeg_available();
+        if !has_ffmpeg && (self.media_filter == MediaFilter::All || self.media_filter == MediaFilter::VideosOnly) {
+            if !self.quiet {
+                println!(
+                    "{} FFmpeg not found. Video perceptual hashing disabled.",
+                    style(WARNING_PREFIX).yellow().bold()
+                );
+                println!(
+                    "   Install FFmpeg or run with --media images to scan only images."
+                );
+            }
+            log::warn!("FFmpeg not available, video perceptual hashing will be skipped");
+        }
 
         // Spinner for file collection
         let spinner = if !self.quiet {
@@ -128,7 +149,7 @@ impl Command for Scanner {
             None
         };
 
-        let report = duplicate::find_duplicates_with_progress(&files, progress_callback)?;
+        let report = duplicate::find_duplicates_with_options(&files, progress_callback, self.media_filter)?;
 
         if let Some(pb) = progress_bar {
             pb.finish_and_clear();

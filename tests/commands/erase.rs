@@ -5,6 +5,7 @@ use std::fs;
 use media_duplicate_eraser_rs::commands::erase::Eraser;
 use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
+use media_duplicate_eraser_rs::services::duplicate::MediaFilter;
 
 use crate::common::{assert_path_exists, assert_path_not_exists, images_fixtures_dir, temp_dir};
 
@@ -30,7 +31,7 @@ fn setup_duplicates() -> (tempfile::TempDir, std::path::PathBuf, std::path::Path
 
 /// Helper to run scan and create duplicates.json
 fn run_scan(dir: &std::path::Path) {
-    let scanner = Scanner::new(dir.to_path_buf(), false, false, None, true);
+    let scanner = Scanner::new(dir.to_path_buf(), false, false, None, true, MediaFilter::All);
     scanner.execute().expect("Scan should succeed");
 }
 
@@ -197,7 +198,7 @@ fn test_erase_preserves_directory_structure() {
     fs::write(&duplicate, "photo content").unwrap();
 
     // Run scan recursively
-    let scanner = Scanner::new(tmp.path().to_path_buf(), true, false, None, true);
+    let scanner = Scanner::new(tmp.path().to_path_buf(), true, false, None, true, MediaFilter::All);
     scanner.execute().unwrap();
 
     // Execute: Run eraser
@@ -337,7 +338,7 @@ fn test_erase_deletes_duplicate_images() {
     let (tmp, copied_files) = setup_image_duplicates();
 
     // Run scan to detect duplicates
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true);
+    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
     scanner.execute().expect("Scan should succeed");
 
     // Verify scan created duplicates.json
@@ -393,7 +394,7 @@ fn test_erase_preserves_unique_images() {
     fs::copy(&image_b_src, &image_b_dest).unwrap();
 
     // Run scan
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true);
+    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
     scanner.execute().expect("Scan should succeed");
 
     // duplicates.json might or might not exist depending on perceptual similarity
@@ -426,7 +427,7 @@ fn test_erase_image_duplicates_keeps_one_copy() {
     fs::copy(&image_a_copy_src, &image_a_copy_dest).unwrap();
 
     // Run scan
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true);
+    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
     scanner.execute().expect("Scan should succeed");
 
     let duplicates_json = tmp.path().join("duplicates.json");

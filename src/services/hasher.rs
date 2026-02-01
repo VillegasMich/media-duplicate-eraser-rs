@@ -2,7 +2,7 @@
 //!
 //! This module provides two types of hashing:
 //! - **Cryptographic (SHA256)**: For detecting exact duplicates
-//! - **Perceptual (pHash)**: For detecting visually similar images
+//! - **Perceptual (pHash)**: For detecting visually similar images and videos
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -15,6 +15,38 @@ use crate::error::Result;
 
 /// Size of the buffer used for reading files when computing SHA256.
 const BUFFER_SIZE: usize = 8192;
+
+/// Supported image extensions for perceptual hashing.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "ico",
+];
+
+/// Supported video extensions for perceptual hashing.
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp",
+];
+
+/// Media type classification for files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaType {
+    Image,
+    Video,
+    Unknown,
+}
+
+/// Determines the media type of a file based on its extension.
+pub fn get_media_type(path: &Path) -> MediaType {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+
+    match ext.as_deref() {
+        Some(e) if IMAGE_EXTENSIONS.contains(&e) => MediaType::Image,
+        Some(e) if VIDEO_EXTENSIONS.contains(&e) => MediaType::Video,
+        _ => MediaType::Unknown,
+    }
+}
 
 /// Computes the SHA256 hash of a file.
 ///
@@ -61,6 +93,132 @@ pub fn perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
     Ok(Some(hash))
 }
 
+/// Computes the perceptual hash of a video by extracting key frames.
+///
+/// Extracts frames at regular intervals and computes a combined hash.
+/// Returns `None` if the file is not a valid video or FFmpeg is not available.
+pub fn video_perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
+    use ffmpeg_sidecar::command::FfmpegCommand;
+    use ffmpeg_sidecar::event::FfmpegEvent;
+
+    // Number of frames to extract for hashing
+    const FRAMES_TO_EXTRACT: usize = 5;
+    // Frame dimensions for hashing (smaller = faster)
+    const FRAME_WIDTH: u32 = 160;
+    const FRAME_HEIGHT: u32 = 120;
+
+    let path_str = path.to_string_lossy();
+
+    // Use FFmpeg to extract frames as raw RGB data
+    // We'll extract 5 frames evenly distributed throughout the video
+    let mut child = match FfmpegCommand::new()
+        .input(&*path_str)
+        .args([
+            "-vf",
+            &format!("select='not(mod(n\\,30))',scale={}:{}", FRAME_WIDTH, FRAME_HEIGHT),
+            "-frames:v",
+            &FRAMES_TO_EXTRACT.to_string(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ])
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            log::debug!("Could not spawn FFmpeg for {:?}: {}", path, e);
+            return Ok(None);
+        }
+    };
+
+    let iter = match child.iter() {
+        Ok(iter) => iter,
+        Err(e) => {
+            log::debug!("Could not create FFmpeg iterator for {:?}: {}", path, e);
+            return Ok(None);
+        }
+    };
+
+    let mut frame_data: Vec<u8> = Vec::new();
+    let mut frames_collected = 0;
+    let frame_size = (FRAME_WIDTH * FRAME_HEIGHT * 3) as usize;
+
+    for event in iter {
+        match event {
+            FfmpegEvent::OutputFrame(frame) => {
+                frame_data.extend_from_slice(&frame.data);
+                frames_collected += 1;
+                if frames_collected >= FRAMES_TO_EXTRACT {
+                    break;
+                }
+            }
+            FfmpegEvent::Error(e) => {
+                log::debug!("FFmpeg error for {:?}: {}", path, e);
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+
+    if frame_data.is_empty() {
+        log::debug!("No frames extracted from {:?}", path);
+        return Ok(None);
+    }
+
+    // Create a composite image from the extracted frames
+    // Stack frames vertically to create a single image for hashing
+    let actual_frames = frame_data.len() / frame_size;
+    if actual_frames == 0 {
+        return Ok(None);
+    }
+
+    let composite_height = FRAME_HEIGHT * actual_frames as u32;
+    let composite_data: Vec<u8> = frame_data
+        .iter()
+        .take(actual_frames * frame_size)
+        .copied()
+        .collect();
+
+    // Create an image buffer from the composite frame data
+    let img_buffer = match image::RgbImage::from_raw(FRAME_WIDTH, composite_height, composite_data)
+    {
+        Some(buf) => buf,
+        None => {
+            log::debug!("Could not create image buffer from video frames {:?}", path);
+            return Ok(None);
+        }
+    };
+
+    let img = image::DynamicImage::ImageRgb8(img_buffer);
+
+    let hasher = HasherConfig::new()
+        .hash_alg(HashAlg::DoubleGradient)
+        .hash_size(16, 16)
+        .to_hasher();
+
+    let hash = hasher.hash_image(&img);
+    Ok(Some(hash))
+}
+
+/// Computes the perceptual hash for any supported media type.
+///
+/// Automatically detects whether the file is an image or video and uses
+/// the appropriate hashing method.
+///
+/// Returns `None` if the file is not a supported media type or cannot be processed.
+pub fn media_perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
+    match get_media_type(path) {
+        MediaType::Image => perceptual_hash(path),
+        MediaType::Video => video_perceptual_hash(path),
+        MediaType::Unknown => {
+            // Try as image first (some formats might not have standard extensions)
+            perceptual_hash(path)
+        }
+    }
+}
+
 /// Calculates the Hamming distance between two perceptual hashes.
 ///
 /// Lower distance means more similar images.
@@ -84,4 +242,29 @@ pub fn are_similar(hash1: &ImageHash, hash2: &ImageHash) -> bool {
 pub fn file_size(path: &Path) -> Result<u64> {
     let metadata = std::fs::metadata(path)?;
     Ok(metadata.len())
+}
+
+/// Checks if FFmpeg is available on the system.
+pub fn is_ffmpeg_available() -> bool {
+    ffmpeg_sidecar::command::ffmpeg_is_installed()
+}
+
+/// Attempts to download FFmpeg if not available.
+/// Returns true if FFmpeg is available after this call.
+pub fn ensure_ffmpeg() -> bool {
+    if is_ffmpeg_available() {
+        return true;
+    }
+
+    log::info!("FFmpeg not found, attempting to download...");
+    match ffmpeg_sidecar::download::auto_download() {
+        Ok(_) => {
+            log::info!("FFmpeg downloaded successfully");
+            true
+        }
+        Err(e) => {
+            log::warn!("Could not download FFmpeg: {}", e);
+            false
+        }
+    }
 }

@@ -1,12 +1,35 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use media_duplicate_eraser_rs::commands::clean::Cleaner;
 use media_duplicate_eraser_rs::commands::erase::Eraser;
 use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
 use media_duplicate_eraser_rs::error::Result;
+use media_duplicate_eraser_rs::services::duplicate::MediaFilter;
 
 use crate::logger;
+
+/// Media type filter for scanning
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum MediaType {
+    /// Scan all supported media types (images and videos)
+    #[default]
+    All,
+    /// Scan only images
+    Images,
+    /// Scan only videos
+    Videos,
+}
+
+impl From<MediaType> for MediaFilter {
+    fn from(media_type: MediaType) -> Self {
+        match media_type {
+            MediaType::All => MediaFilter::All,
+            MediaType::Images => MediaFilter::ImagesOnly,
+            MediaType::Videos => MediaFilter::VideosOnly,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "mde")]
@@ -43,6 +66,10 @@ pub enum Commands {
         /// Output file for duplicates (JSON format). Defaults to duplicates.json in the first scanned directory.
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+
+        /// Filter by media type (all, images, or videos)
+        #[arg(short, long, value_enum, default_value_t = MediaType::All)]
+        media: MediaType,
     },
 
     /// Remove duplicates.json file from a directory
@@ -71,7 +98,15 @@ pub fn run() -> Result<()> {
             recursive,
             include_hidden,
             output,
-        } => Box::new(Scanner::new(path, recursive, include_hidden, output, cli.quiet)),
+            media,
+        } => Box::new(Scanner::new(
+            path,
+            recursive,
+            include_hidden,
+            output,
+            cli.quiet,
+            media.into(),
+        )),
         Commands::Clean { path } => Box::new(Cleaner::new(path, cli.quiet)),
         Commands::Erase { path } => Box::new(Eraser::new(path, cli.quiet)),
     };
