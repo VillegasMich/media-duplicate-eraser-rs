@@ -72,6 +72,12 @@ mde scan /path/to/photos --include-hidden
 # Specify custom output file
 mde scan /path/to/photos -o duplicates.json
 
+# Filter by media type
+mde scan --media images /path/to/photos  # Images only
+mde scan --media videos /path/to/photos  # Videos only
+mde scan --media audio /path/to/photos   # Audio only
+mde scan --media all /path/to/photos     # All media (default)
+
 # Increase verbosity (-v for info, -vv for debug)
 mde -v scan /path/to/photos
 mde -vv scan /path/to/photos
@@ -162,7 +168,7 @@ Group 2 [SIMILAR] - 2 files:
 
 ## How Duplicate Detection Works
 
-The tool uses a **two-pass approach** to efficiently find both exact and visually similar duplicates:
+The tool uses a **two-pass approach** to efficiently find both exact and perceptually similar duplicates:
 
 ### Pass 1: Exact Duplicates (Fast)
 
@@ -172,25 +178,46 @@ The tool uses a **two-pass approach** to efficiently find both exact and visuall
 
 ### Pass 2: Perceptual Duplicates (Thorough)
 
-For files that aren't exact duplicates, we use **perceptual hashing** to find visually similar images:
+For files that aren't exact duplicates, we use **perceptual hashing** to find similar media:
 
-1. **Perceptual Hash (pHash)**: Each image is converted to a compact fingerprint that represents its visual content
-2. **Hamming Distance**: Compare fingerprints using bitwise difference
-3. Images with distance ≤ 10 are considered **similar**
+#### Images
+- **Perceptual Hash (pHash)**: Each image is converted to a compact fingerprint representing its visual content
+- **Hamming Distance**: Compare fingerprints using bitwise difference (≤ 10 = similar)
+
+#### Videos (requires FFmpeg)
+- **Frame Extraction**: Extract 5 key frames evenly distributed throughout the video
+- **Composite Hashing**: Stack frames vertically and compute a perceptual hash of the composite image
+- Detects videos with same content but different encoding, resolution, or format
+
+#### Audio (requires FFmpeg)
+- **Spectrogram Generation**: Convert audio to a visual spectrogram using FFmpeg's `showspectrumpic` filter
+- **Image Hashing**: Hash the spectrogram image like a regular image
+- Detects audio files with same content but different format, bitrate, or encoding
 
 #### What Perceptual Hashing Detects
 
 | Detected | Not Detected |
 |----------|--------------|
-| Re-saved images (different compression) | Completely different images |
-| Format conversions (PNG → JPEG) | Heavy cropping |
+| Re-saved media (different compression) | Completely different content |
+| Format conversions (PNG → JPEG, MP4 → MKV, MP3 → AAC) | Heavy cropping |
 | Minor resizing | Significant edits |
-| Screenshots of same content | Different photos of same subject |
+| Screenshots of same content | Different recordings of same subject |
 | Exact copies with different names | |
 
 ### Pass 3: Merge Groups
 
-When a perceptually similar image is found that relates to an exact duplicate group, all files are merged into a single group.
+When a perceptually similar file is found that relates to an exact duplicate group, all files are merged into a single group.
+
+## Supported Formats
+
+### Images
+`jpg`, `jpeg`, `png`, `gif`, `bmp`, `webp`, `tiff`, `tif`, `ico`
+
+### Videos (requires FFmpeg)
+`mp4`, `mkv`, `avi`, `mov`, `wmv`, `flv`, `webm`, `m4v`, `mpeg`, `mpg`, `3gp`
+
+### Audio (requires FFmpeg)
+`wav`, `flac`, `aiff`, `ape`, `mp3`, `m4a`, `aac`, `ogg`, `opus`, `wma`
 
 ## Project Structure
 
@@ -229,6 +256,7 @@ tests/
 | [sha2](https://crates.io/crates/sha2) | SHA-256 hashing |
 | [image_hasher](https://crates.io/crates/image_hasher) | Perceptual hashing |
 | [image](https://crates.io/crates/image) | Image loading |
+| [ffmpeg-sidecar](https://crates.io/crates/ffmpeg-sidecar) | FFmpeg integration for video/audio |
 | [serde](https://crates.io/crates/serde) | Serialization |
 | [serde_json](https://crates.io/crates/serde_json) | JSON output |
 | [chrono](https://crates.io/crates/chrono) | Timestamps |
@@ -245,7 +273,7 @@ cargo test
 
 - [x] `erase` command to delete all duplicate files marked by the scan
 - [x] `clean` command to remove duplicates.json file
-- [ ] Support for more media types (videos and audio)
+- [x] Support for more media types (videos and audio)
 - [x] Publish to [crates.io](https://crates.io/crates/media-duplicate-eraser-rs)
 - [ ] Implement CI/CD for contributions
 - [ ] Publish to [Homebrew](https://brew.sh/)
