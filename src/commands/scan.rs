@@ -66,19 +66,22 @@ impl Command for Scanner {
             self.media_filter
         );
 
-        // Check if FFmpeg is available for video processing
+        // Check if FFmpeg is available for video/audio processing
         let has_ffmpeg = hasher::is_ffmpeg_available();
-        if !has_ffmpeg && (self.media_filter == MediaFilter::All || self.media_filter == MediaFilter::VideosOnly) {
+        let needs_ffmpeg = self.media_filter == MediaFilter::All
+            || self.media_filter == MediaFilter::VideosOnly
+            || self.media_filter == MediaFilter::AudioOnly;
+        if !has_ffmpeg && needs_ffmpeg {
             if !self.quiet {
                 println!(
-                    "{} FFmpeg not found. Video perceptual hashing disabled.",
+                    "{} FFmpeg not found. Video and audio perceptual hashing disabled.",
                     style(WARNING_PREFIX).yellow().bold()
                 );
                 println!(
                     "   Install FFmpeg or run with --media images to scan only images."
                 );
             }
-            log::warn!("FFmpeg not available, video perceptual hashing will be skipped");
+            log::warn!("FFmpeg not available, video and audio perceptual hashing will be skipped");
         }
 
         // Spinner for file collection

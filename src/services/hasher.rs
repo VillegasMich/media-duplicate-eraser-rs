@@ -26,11 +26,20 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp",
 ];
 
+/// Supported audio extensions for perceptual hashing.
+const AUDIO_EXTENSIONS: &[&str] = &[
+    // Lossless
+    "wav", "flac", "aiff", "ape",
+    // Lossy
+    "mp3", "m4a", "aac", "ogg", "opus", "wma",
+];
+
 /// Media type classification for files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
     Image,
     Video,
+    Audio,
     Unknown,
 }
 
@@ -44,6 +53,7 @@ pub fn get_media_type(path: &Path) -> MediaType {
     match ext.as_deref() {
         Some(e) if IMAGE_EXTENSIONS.contains(&e) => MediaType::Image,
         Some(e) if VIDEO_EXTENSIONS.contains(&e) => MediaType::Video,
+        Some(e) if AUDIO_EXTENSIONS.contains(&e) => MediaType::Audio,
         _ => MediaType::Unknown,
     }
 }
@@ -202,9 +212,74 @@ pub fn video_perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
     Ok(Some(hash))
 }
 
+/// Computes the perceptual hash of an audio file by generating a spectrogram.
+///
+/// Uses FFmpeg to create a spectrogram image from the audio, then hashes it
+/// like a regular image. Returns `None` if the file is not valid audio or
+/// FFmpeg is not available.
+pub fn audio_perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
+    use std::process::{Command, Stdio};
+
+    let path_str = path.to_string_lossy();
+
+    // Use FFmpeg to generate spectrogram as PNG to stdout
+    // showspectrumpic creates a single image from the entire audio
+    let output = match Command::new("ffmpeg")
+        .args([
+            "-i",
+            &path_str,
+            "-lavfi",
+            "showspectrumpic=s=512x256:color=intensity",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::debug!("Could not spawn FFmpeg for audio {:?}: {}", path, e);
+            return Ok(None);
+        }
+    };
+
+    if !output.status.success() || output.stdout.is_empty() {
+        log::debug!(
+            "FFmpeg failed to generate spectrogram for {:?} (status: {:?})",
+            path,
+            output.status
+        );
+        return Ok(None);
+    }
+
+    // Load the PNG from stdout bytes
+    let img = match image::load_from_memory(&output.stdout) {
+        Ok(img) => img,
+        Err(e) => {
+            log::debug!("Could not decode spectrogram PNG for {:?}: {}", path, e);
+            return Ok(None);
+        }
+    };
+
+    let hasher = HasherConfig::new()
+        .hash_alg(HashAlg::DoubleGradient)
+        .hash_size(16, 16)
+        .to_hasher();
+
+    let hash = hasher.hash_image(&img);
+    Ok(Some(hash))
+}
+
 /// Computes the perceptual hash for any supported media type.
 ///
-/// Automatically detects whether the file is an image or video and uses
+/// Automatically detects whether the file is an image, video, or audio and uses
 /// the appropriate hashing method.
 ///
 /// Returns `None` if the file is not a supported media type or cannot be processed.
@@ -212,6 +287,7 @@ pub fn media_perceptual_hash(path: &Path) -> Result<Option<ImageHash>> {
     match get_media_type(path) {
         MediaType::Image => perceptual_hash(path),
         MediaType::Video => video_perceptual_hash(path),
+        MediaType::Audio => audio_perceptual_hash(path),
         MediaType::Unknown => {
             // Try as image first (some formats might not have standard extensions)
             perceptual_hash(path)

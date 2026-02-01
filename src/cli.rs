@@ -12,13 +12,15 @@ use crate::logger;
 /// Media type filter for scanning
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum MediaType {
-    /// Scan all supported media types (images and videos)
+    /// Scan all supported media types (images, videos, and audio)
     #[default]
     All,
     /// Scan only images
     Images,
     /// Scan only videos
     Videos,
+    /// Scan only audio files
+    Audio,
 }
 
 impl From<MediaType> for MediaFilter {
@@ -27,6 +29,7 @@ impl From<MediaType> for MediaFilter {
             MediaType::All => MediaFilter::All,
             MediaType::Images => MediaFilter::ImagesOnly,
             MediaType::Videos => MediaFilter::VideosOnly,
+            MediaType::Audio => MediaFilter::AudioOnly,
         }
     }
 }
@@ -67,7 +70,7 @@ pub enum Commands {
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
 
-        /// Filter by media type (all, images, or videos)
+        /// Filter by media type (all, images, videos, or audio)
         #[arg(short, long, value_enum, default_value_t = MediaType::All)]
         media: MediaType,
     },

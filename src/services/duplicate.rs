@@ -38,13 +38,15 @@ pub enum DuplicateType {
 /// Filter for which media types to scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
-    /// Scan all supported media types (images and videos).
+    /// Scan all supported media types (images, videos, and audio).
     #[default]
     All,
     /// Scan only images.
     ImagesOnly,
     /// Scan only videos.
     VideosOnly,
+    /// Scan only audio files.
+    AudioOnly,
 }
 
 impl MediaFilter {
@@ -55,6 +57,7 @@ impl MediaFilter {
             MediaFilter::All => true,
             MediaFilter::ImagesOnly => media_type == MediaType::Image,
             MediaFilter::VideosOnly => media_type == MediaType::Video,
+            MediaFilter::AudioOnly => media_type == MediaType::Audio,
         }
     }
 
@@ -62,9 +65,14 @@ impl MediaFilter {
     pub fn includes_for_perceptual(&self, path: &Path) -> bool {
         let media_type = hasher::get_media_type(path);
         match self {
-            MediaFilter::All => media_type == MediaType::Image || media_type == MediaType::Video,
+            MediaFilter::All => {
+                media_type == MediaType::Image
+                    || media_type == MediaType::Video
+                    || media_type == MediaType::Audio
+            }
             MediaFilter::ImagesOnly => media_type == MediaType::Image,
             MediaFilter::VideosOnly => media_type == MediaType::Video,
+            MediaFilter::AudioOnly => media_type == MediaType::Audio,
         }
     }
 }
