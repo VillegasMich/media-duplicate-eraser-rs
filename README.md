@@ -5,7 +5,7 @@
     </td>
     <td style="vertical-align: bottom; padding-left: 14px;">
       <img
-        src="assets/logo.png"
+        src="assets/icon.png"
         width="64"
         alt="mde icon"
       />
