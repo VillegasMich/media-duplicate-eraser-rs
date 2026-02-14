@@ -26,6 +26,7 @@ Builds cross-platform binaries and creates a GitHub release with all assets atta
 1. **validate** — Checks the tag format, ensures it doesn't already exist, and pushes it.
 2. **build** — Compiles release binaries for all 5 targets in parallel and packages them with LICENSE and README.
 3. **release** — Downloads all artifacts, generates SHA256 checksums and a changelog, then creates the GitHub release.
+4. **publish** — Publishes the crate to crates.io. Skipped for pre-releases.
 
 **Inputs:**
 | Input | Required | Description |
@@ -46,4 +47,9 @@ Builds cross-platform binaries and creates a GitHub release with all assets atta
    - **notes**: any extra context you want in the release description.
 6. Click **Run workflow**.
 
-The workflow will create the git tag, build all binaries, and publish the release automatically. Once complete, the release page will have downloadable archives for all platforms along with SHA256 checksums.
+The workflow will create the git tag, build all binaries, publish the release, and publish the crate to crates.io automatically (unless it's a pre-release). Once complete, the release page will have downloadable archives for all platforms along with SHA256 checksums.
+
+**Required secrets:**
+| Secret | Description |
+|--------|-------------|
+| `CARGO_REGISTRY_TOKEN` | API token from [crates.io](https://crates.io/settings/tokens). Required for the `publish` job. |
