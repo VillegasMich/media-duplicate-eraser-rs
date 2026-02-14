@@ -17,6 +17,7 @@
 A CLI tool to find and remove duplicate media files.
 
 [![Crates.io](https://img.shields.io/crates/v/media-duplicate-eraser-rs.svg)](https://crates.io/crates/media-duplicate-eraser-rs)
+![Crates.io Downloads](https://img.shields.io/crates/d/dot_rust.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![GitHub stars](https://img.shields.io/github/stars/villegasmich/media-duplicate-eraser-rs.svg)
 ![GitHub issues](https://img.shields.io/github/issues/villegasmich/media-duplicate-eraser-rs.svg)
