@@ -8,6 +8,7 @@ repository = "https://github.com/mvillegas/media-duplicate-eraser-rs"
 keywords = ["duplicate", "media", "images", "cli", "deduplication"]
 categories = ["command-line-utilities", "filesystem"]
 default-run = "mde"
+exclude = ["media/", "tests/", "assets/", ".github/"]
 
 [[bin]]
 name = "mde"
