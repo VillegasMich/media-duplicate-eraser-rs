@@ -19,7 +19,6 @@ Builds cross-platform binaries and creates a GitHub release with all assets atta
 |----------|--------|---------|
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | tar.gz |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | tar.gz |
-| macOS Intel | `x86_64-apple-darwin` | tar.gz |
 | macOS Apple Silicon | `aarch64-apple-darwin` | tar.gz |
 | Windows x86_64 | `x86_64-pc-windows-msvc` | zip |
 
