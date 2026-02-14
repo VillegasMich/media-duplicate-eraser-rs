@@ -1,0 +1,224 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.2.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+      notes:
+        description: 'Additional release notes (optional)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: mde
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag format
+        run: |
+          if [[ ! "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-.*)?$ ]]; then
+            echo "::error::Tag must match pattern v*.*.* (e.g., v0.2.0 or v1.0.0-rc1)"
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "${{ inputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.tag }} already exists"
+            exit 1
+          fi
+
+      - name: Create and push tag
+        run: |
+          git tag "${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            binary_ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            binary_ext: ""
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.gz
+            binary_ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            binary_ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            binary_ext: ".exe"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.binary_ext }} staging/
+          cp LICENSE README.md staging/
+          cd staging
+          tar czf ../${{ env.BINARY_NAME }}-${{ inputs.tag }}-${{ matrix.target }}.tar.gz *
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.binary_ext }}" staging/
+          Copy-Item LICENSE, README.md staging/
+          Compress-Archive -Path staging/* -DestinationPath "${{ env.BINARY_NAME }}-${{ inputs.tag }}-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: ${{ env.BINARY_NAME }}-${{ inputs.tag }}-${{ matrix.target }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum ${{ env.BINARY_NAME }}-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "${{ inputs.tag }}^" 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" "${{ inputs.tag }}")
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${{ inputs.tag }}")
+          fi
+          echo "$CHANGELOG" > changelog.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          USER_NOTES="${{ inputs.notes }}"
+
+          cat > release_notes.md <<'NOTESEOF'
+          ## What's Changed
+          NOTESEOF
+
+          cat changelog.txt >> release_notes.md
+
+          if [ -n "$USER_NOTES" ]; then
+            cat >> release_notes.md <<NOTESEOF
+
+          ## Additional Notes
+
+          ${USER_NOTES}
+          NOTESEOF
+          fi
+
+          cat >> release_notes.md <<'NOTESEOF'
+
+          ## Requirements
+
+          > **Note:** Video and audio duplicate detection requires [FFmpeg](https://ffmpeg.org/) installed on your system.
+
+          ## Checksums (SHA256)
+
+          ```
+          NOTESEOF
+
+          cat artifacts/SHA256SUMS.txt >> release_notes.md
+
+          cat >> release_notes.md <<'NOTESEOF'
+          ```
+
+          ## Installation
+
+          Download the appropriate binary for your platform, extract it, and place `mde` in your PATH.
+
+          Or install via cargo:
+          ```sh
+          cargo install media-duplicate-eraser-rs
+          ```
+          NOTESEOF
+
+          gh release create "${{ inputs.tag }}" \
+            --title "${{ env.BINARY_NAME }} ${{ inputs.tag }}" \
+            --notes-file release_notes.md \
+            $PRERELEASE_FLAG \
+            artifacts/${{ env.BINARY_NAME }}-*.tar.gz \
+            artifacts/${{ env.BINARY_NAME }}-*.zip \
+            artifacts/SHA256SUMS.txt
