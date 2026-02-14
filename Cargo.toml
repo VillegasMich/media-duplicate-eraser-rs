@@ -1,6 +1,6 @@
 [package]
 name = "media-duplicate-eraser-rs"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "CLI tool to find and remove duplicate media files using SHA-256 and perceptual hashing"
