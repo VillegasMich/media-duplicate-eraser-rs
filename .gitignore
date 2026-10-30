@@ -1,1 +1,9 @@
 /target
+
+# macOS
+.DS_Store
+
+# Files mde writes while you try it out in the repo
+duplicates.json
+duplicates.json.tmp
+.mde_erase_staging/

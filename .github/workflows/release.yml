@@ -162,13 +162,14 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through the environment, not interpolated into the script,
+          # so release notes can't inject shell commands.
+          USER_NOTES: ${{ inputs.notes }}
         run: |
           PRERELEASE_FLAG=""
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
-
-          USER_NOTES="${{ inputs.notes }}"
 
           cat > release_notes.md <<'NOTESEOF'
           ## What's Changed

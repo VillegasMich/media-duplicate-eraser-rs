@@ -4,7 +4,10 @@
 
 ### Rust (`build_test.yml`)
 
-Runs on every push and pull request to `main`. Builds the project and runs the test suite on Ubuntu.
+Runs on every push and pull request to `main`:
+
+- **lint** — `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
+- **test** — builds and runs the test suite on Ubuntu and macOS with FFmpeg installed, so the video/audio tests run too.
 
 **Trigger:** Automatic on push/PR to `main`.
 
@@ -24,7 +27,7 @@ Builds cross-platform binaries and creates a GitHub release with all assets atta
 
 **Jobs:**
 1. **validate** — Checks the tag format, ensures it doesn't already exist, and pushes it.
-2. **build** — Compiles release binaries for all 5 targets in parallel and packages them with LICENSE and README.
+2. **build** — Compiles release binaries for all 4 targets in parallel and packages them with LICENSE and README.
 3. **release** — Downloads all artifacts, generates SHA256 checksums and a changelog, then creates the GitHub release.
 4. **publish** — Publishes the crate to crates.io. Skipped for pre-releases.
 
