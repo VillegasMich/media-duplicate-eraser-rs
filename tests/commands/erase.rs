@@ -2,10 +2,11 @@
 
 use std::fs;
 
-use media_duplicate_eraser_rs::commands::erase::Eraser;
-use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::commands::Command;
+use media_duplicate_eraser_rs::commands::erase::{Eraser, STAGING_DIR_NAME};
+use media_duplicate_eraser_rs::commands::scan::Scanner;
 use media_duplicate_eraser_rs::services::duplicate::MediaFilter;
+use media_duplicate_eraser_rs::services::manifest::DuplicatesFile;
 
 use crate::common::{assert_path_exists, assert_path_not_exists, images_fixtures_dir, temp_dir};
 
@@ -31,8 +32,20 @@ fn setup_duplicates() -> (tempfile::TempDir, std::path::PathBuf, std::path::Path
 
 /// Helper to run scan and create duplicates.json
 fn run_scan(dir: &std::path::Path) {
-    let scanner = Scanner::new(dir.to_path_buf(), false, false, None, true, MediaFilter::All);
+    let scanner = Scanner::new(
+        dir.to_path_buf(),
+        false,
+        false,
+        None,
+        true,
+        MediaFilter::AnyFile,
+    );
     scanner.execute().expect("Scan should succeed");
+}
+
+/// Creates an eraser that doesn't prompt for confirmation.
+fn eraser(dir: &std::path::Path) -> Eraser {
+    Eraser::new(dir.to_path_buf(), true).assume_yes(true)
 }
 
 #[test]
@@ -54,7 +67,7 @@ fn test_erase_deletes_duplicate_files() {
     assert_path_exists(&unique);
 
     // Execute: Run the eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
@@ -91,7 +104,7 @@ fn test_erase_handles_missing_duplicates_json() {
     fs::write(&file, "content").unwrap();
 
     // Execute: Run eraser without duplicates.json
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command should succeed gracefully
@@ -111,11 +124,13 @@ fn test_erase_handles_empty_duplicates_list() {
     let duplicates_json = tmp.path().join("duplicates.json");
 
     let content = r#"{
-        "version": "1.0",
+        "version": "2",
         "scanned_at": "2024-01-01T00:00:00Z",
+        "root": "/",
         "total_files_scanned": 1,
         "duplicate_groups": 0,
         "total_duplicates": 0,
+        "reclaimable_bytes": 0,
         "entries": []
     }"#;
     fs::write(&duplicates_json, content).unwrap();
@@ -125,7 +140,7 @@ fn test_erase_handles_empty_duplicates_list() {
     fs::write(&file, "content").unwrap();
 
     // Execute: Run eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command should succeed
@@ -159,7 +174,7 @@ fn test_erase_skips_already_deleted_files() {
     assert_path_not_exists(&file_c);
 
     // Execute: Run eraser (it should handle missing files gracefully)
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command should succeed (missing files are skipped with a warning)
@@ -198,11 +213,18 @@ fn test_erase_preserves_directory_structure() {
     fs::write(&duplicate, "photo content").unwrap();
 
     // Run scan recursively
-    let scanner = Scanner::new(tmp.path().to_path_buf(), true, false, None, true, MediaFilter::All);
+    let scanner = Scanner::new(
+        tmp.path().to_path_buf(),
+        true,
+        false,
+        None,
+        true,
+        MediaFilter::AnyFile,
+    );
     scanner.execute().unwrap();
 
     // Execute: Run eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
@@ -248,7 +270,7 @@ fn test_erase_with_multiple_duplicate_groups() {
     run_scan(tmp.path());
 
     // Execute: Run eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
@@ -262,7 +284,10 @@ fn test_erase_with_multiple_duplicate_groups() {
         .into_iter()
         .filter(|p| p.exists())
         .count();
-    assert_eq!(group1_count, 1, "Exactly one file should remain from group 1");
+    assert_eq!(
+        group1_count, 1,
+        "Exactly one file should remain from group 1"
+    );
 
     // Verify: Exactly one file should remain from group 2
     let group2_count = [&group2_a, &group2_b, &group2_c]
@@ -283,7 +308,7 @@ fn test_erase_is_idempotent() {
     run_scan(tmp.path());
 
     // Execute: Run eraser twice
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
 
     let result1 = eraser.execute();
     assert!(result1.is_ok(), "First erase should succeed");
@@ -338,7 +363,14 @@ fn test_erase_deletes_duplicate_images() {
     let (tmp, copied_files) = setup_image_duplicates();
 
     // Run scan to detect duplicates
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
+    let scanner = Scanner::new(
+        tmp.path().to_path_buf(),
+        false,
+        false,
+        None,
+        true,
+        MediaFilter::All,
+    );
     scanner.execute().expect("Scan should succeed");
 
     // Verify scan created duplicates.json
@@ -350,11 +382,14 @@ fn test_erase_deletes_duplicate_images() {
     assert_eq!(files_before.len(), 4, "Should have 4 images before erase");
 
     // Execute: Run the eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
-    assert!(result.is_ok(), "Eraser should execute without error on images");
+    assert!(
+        result.is_ok(),
+        "Eraser should execute without error on images"
+    );
 
     // Verify: duplicates.json was removed
     assert_path_not_exists(&duplicates_json);
@@ -394,14 +429,21 @@ fn test_erase_preserves_unique_images() {
     fs::copy(&image_b_src, &image_b_dest).unwrap();
 
     // Run scan
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
+    let scanner = Scanner::new(
+        tmp.path().to_path_buf(),
+        false,
+        false,
+        None,
+        true,
+        MediaFilter::All,
+    );
     scanner.execute().expect("Scan should succeed");
 
     // duplicates.json might or might not exist depending on perceptual similarity
     // but if it does, erase should not delete any files
 
     // Execute: Run eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
@@ -427,14 +469,21 @@ fn test_erase_image_duplicates_keeps_one_copy() {
     fs::copy(&image_a_copy_src, &image_a_copy_dest).unwrap();
 
     // Run scan
-    let scanner = Scanner::new(tmp.path().to_path_buf(), false, false, None, true, MediaFilter::All);
+    let scanner = Scanner::new(
+        tmp.path().to_path_buf(),
+        false,
+        false,
+        None,
+        true,
+        MediaFilter::All,
+    );
     scanner.execute().expect("Scan should succeed");
 
     let duplicates_json = tmp.path().join("duplicates.json");
     assert_path_exists(&duplicates_json);
 
     // Execute: Run eraser
-    let eraser = Eraser::new(tmp.path().to_path_buf(), true);
+    let eraser = eraser(tmp.path());
     let result = eraser.execute();
 
     // Verify: Command succeeded
@@ -448,4 +497,168 @@ fn test_erase_image_duplicates_keeps_one_copy() {
         (image_a_exists && !image_a_copy_exists) || (!image_a_exists && image_a_copy_exists),
         "Exactly one copy of image_a should remain after erase"
     );
+}
+
+// ============================================================================
+// Safety regression tests
+// ============================================================================
+
+/// Creates `a.jpg` and `b.jpg` with identical content, scans, and returns
+/// (temp_dir, kept file, file marked for deletion).
+fn scanned_pair() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = temp_dir();
+    fs::write(tmp.path().join("a.jpg"), "same bytes").unwrap();
+    fs::write(tmp.path().join("b.jpg"), "same bytes").unwrap();
+    run_scan(tmp.path());
+    let file = DuplicatesFile::load(&tmp.path().join("duplicates.json")).unwrap();
+    let entry = &file.entries[0];
+    (
+        tmp,
+        entry.original.path.clone(),
+        entry.duplicates[0].path.clone(),
+    )
+}
+
+#[test]
+fn test_erase_keeps_duplicates_when_original_is_gone() {
+    let (tmp, original, duplicate) = scanned_pair();
+    fs::remove_file(&original).unwrap();
+
+    eraser(tmp.path()).execute().unwrap();
+
+    assert_path_exists(&duplicate);
+}
+
+#[test]
+fn test_erase_keeps_files_modified_after_scan() {
+    let (tmp, _original, duplicate) = scanned_pair();
+    fs::write(&duplicate, "edited since the scan").unwrap();
+
+    eraser(tmp.path()).execute().unwrap();
+
+    assert_path_exists(&duplicate);
+}
+
+#[test]
+fn test_erase_does_not_depend_on_working_directory() {
+    // Scanning with a relative path used to write relative paths, which erase
+    // then resolved against its own working directory.
+    let (tmp, original, duplicate) = scanned_pair();
+    let elsewhere = temp_dir();
+    let decoy = elsewhere.path().join(duplicate.file_name().unwrap());
+    fs::write(&decoy, "unrelated").unwrap();
+
+    eraser(tmp.path()).execute().unwrap();
+
+    assert_path_exists(&original);
+    assert_path_not_exists(&duplicate);
+    assert_path_exists(&decoy);
+}
+
+#[test]
+fn test_erase_rejects_relative_paths() {
+    let tmp = temp_dir();
+    fs::write(tmp.path().join("keep.jpg"), "x").unwrap();
+    fs::write(tmp.path().join("dup.jpg"), "x").unwrap();
+    let content = format!(
+        r#"{{"version":"2","scanned_at":"2024-01-01T00:00:00Z","root":{root:?},
+        "total_files_scanned":2,"duplicate_groups":1,"total_duplicates":1,"reclaimable_bytes":1,
+        "entries":[{{"original":{{"path":"keep.jpg","size":1,"modified":null}},
+        "duplicates":[{{"path":"dup.jpg","size":1,"modified":null}}],"duplicate_type":"exact"}}]}}"#,
+        root = tmp.path()
+    );
+    fs::write(tmp.path().join("duplicates.json"), content).unwrap();
+
+    assert!(eraser(tmp.path()).execute().is_err());
+    assert_path_exists(&tmp.path().join("dup.jpg"));
+}
+
+#[test]
+fn test_erase_rejects_old_format() {
+    let tmp = temp_dir();
+    let dup = tmp.path().join("dup.jpg");
+    fs::write(&dup, "x").unwrap();
+    let content = format!(
+        r#"{{"version":"1.0","scanned_at":"2024-01-01T00:00:00Z","total_files_scanned":2,
+        "duplicate_groups":1,"total_duplicates":1,
+        "entries":[{{"original":"/nonexistent","duplicates":[{dup:?}],"duplicate_type":"exact"}}]}}"#
+    );
+    fs::write(tmp.path().join("duplicates.json"), content).unwrap();
+
+    assert!(eraser(tmp.path()).execute().is_err());
+    assert_path_exists(&dup);
+}
+
+#[test]
+fn test_erase_never_deletes_a_file_listed_as_original() {
+    let (tmp, original, duplicate) = scanned_pair();
+    let path = tmp.path().join("duplicates.json");
+    let mut file = DuplicatesFile::load(&path).unwrap();
+    // Hand-edit: add a second entry that keeps the duplicate and deletes the original.
+    let mut swapped = file.entries[0].clone();
+    std::mem::swap(&mut swapped.original, &mut swapped.duplicates[0]);
+    file.entries.push(swapped);
+    file.save(&path).unwrap();
+
+    eraser(tmp.path()).execute().unwrap();
+
+    assert_path_exists(&original);
+    assert_path_exists(&duplicate);
+}
+
+#[test]
+fn test_dry_run_deletes_nothing() {
+    let (tmp, original, duplicate) = scanned_pair();
+
+    Eraser::new(tmp.path().to_path_buf(), true)
+        .dry_run(true)
+        .execute()
+        .unwrap();
+
+    assert_path_exists(&original);
+    assert_path_exists(&duplicate);
+    assert_path_exists(&tmp.path().join("duplicates.json"));
+}
+
+#[test]
+fn test_erase_refuses_leftover_staging_dir() {
+    let (tmp, _original, duplicate) = scanned_pair();
+    let staging = tmp.path().join(STAGING_DIR_NAME);
+    fs::create_dir(&staging).unwrap();
+    let stranded = staging.join("0");
+    fs::write(&stranded, "a file a previous rollback could not restore").unwrap();
+
+    assert!(eraser(tmp.path()).execute().is_err());
+
+    assert_path_exists(&stranded);
+    assert_path_exists(&duplicate);
+}
+
+#[test]
+fn test_erase_accepts_custom_duplicates_file() {
+    let tmp = temp_dir();
+    fs::write(tmp.path().join("a.jpg"), "same").unwrap();
+    fs::write(tmp.path().join("b.jpg"), "same").unwrap();
+    let out = temp_dir();
+    let json = out.path().join("my-dups.json");
+    Scanner::new(
+        tmp.path().to_path_buf(),
+        true,
+        false,
+        Some(json.clone()),
+        true,
+        MediaFilter::All,
+    )
+    .execute()
+    .unwrap();
+
+    eraser(&json).execute().unwrap();
+
+    let remaining = ["a.jpg", "b.jpg"]
+        .iter()
+        .filter(|f| tmp.path().join(f).exists())
+        .count();
+    assert_eq!(remaining, 1);
+    assert_path_not_exists(&json);
+    assert_path_not_exists(&tmp.path().join(STAGING_DIR_NAME));
 }

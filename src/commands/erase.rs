@@ -1,350 +1,392 @@
+use std::collections::HashSet;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
 
 use super::Command;
 use crate::error::{Error, Result};
-use crate::services::duplicate::DuplicatesFile;
+use crate::output::{self, display_path, human_size};
+use crate::services::duplicate::DuplicateType;
+use crate::services::hasher;
+use crate::services::manifest::{DuplicatesFile, FileRecord, resolve_duplicates_path};
 
-const DUPLICATES_FILENAME: &str = "duplicates.json";
-const STAGING_DIR_NAME: &str = ".mde_erase_staging";
-
-// Styled output prefixes (Classic ASCII)
-const SUCCESS_PREFIX: &str = "[OK]";
-const WARNING_PREFIX: &str = "[!]";
-const ERROR_PREFIX: &str = "[X]";
-const INFO_PREFIX: &str = "[*]";
+/// Name of the directory files are moved into before being deleted.
+pub const STAGING_DIR_NAME: &str = ".mde_erase_staging";
+/// File inside the staging directory mapping staged names back to original paths.
+const RESTORE_FILENAME: &str = "restore.tsv";
 
 pub struct Eraser {
     path: PathBuf,
     quiet: bool,
+    dry_run: bool,
+    assume_yes: bool,
+}
+
+/// Why a listed duplicate is not going to be deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    OriginalMissing,
+    Missing,
+    Changed,
+    IsAnOriginal,
+}
+
+impl SkipReason {
+    fn describe(self) -> &'static str {
+        match self {
+            SkipReason::OriginalMissing => "the file it duplicates is missing or changed",
+            SkipReason::Missing => "no longer exists",
+            SkipReason::Changed => "changed since the scan",
+            SkipReason::IsAnOriginal => "is also listed as a file to keep",
+        }
+    }
+}
+
+/// The verified result of comparing the duplicates file with the disk.
+struct ErasePlan {
+    delete: Vec<FileRecord>,
+    skipped: Vec<(PathBuf, SkipReason)>,
 }
 
 impl Eraser {
+    /// Creates an eraser for `path`, which is either a directory containing
+    /// `duplicates.json` or the path of a duplicates file.
+    ///
+    /// By default it asks for confirmation before deleting; see [`Eraser::assume_yes`].
     pub fn new(path: PathBuf, quiet: bool) -> Self {
-        Self { path, quiet }
+        Self {
+            path,
+            quiet,
+            dry_run: false,
+            assume_yes: false,
+        }
     }
 
-    /// Returns the path to the duplicates.json file.
-    fn duplicates_file_path(&self) -> PathBuf {
-        self.path.join(DUPLICATES_FILENAME)
+    /// Only show what would be deleted, without deleting anything.
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
     }
 
-    /// Returns the path to the staging directory.
-    fn staging_dir(&self) -> PathBuf {
-        self.path.join(STAGING_DIR_NAME)
+    /// Skip the confirmation prompt.
+    pub fn assume_yes(mut self, assume_yes: bool) -> Self {
+        self.assume_yes = assume_yes;
+        self
+    }
+
+    fn say(&self, msg: impl std::fmt::Display) {
+        if !self.quiet {
+            println!("{}", msg);
+        }
     }
 }
 
 impl Command for Eraser {
     fn execute(&self) -> Result<()> {
-        let duplicates_path = self.duplicates_file_path();
+        let duplicates_path = resolve_duplicates_path(&self.path);
 
         log::info!("Looking for duplicates file at: {:?}", duplicates_path);
 
         if !duplicates_path.exists() {
-            if !self.quiet {
-                println!(
-                    "{} No duplicates.json found in: {}\n   Run 'mde scan' first to detect duplicates.",
-                    style(INFO_PREFIX).blue().bold(),
-                    style(self.path.display()).cyan()
-                );
-            }
+            self.say(format!(
+                "{} No duplicates file found at: {}\n    Run 'mde scan' first to detect duplicates.",
+                output::info(),
+                style(duplicates_path.display()).cyan()
+            ));
             return Ok(());
         }
 
-        // Load the duplicates file
         let duplicates_file = DuplicatesFile::load(&duplicates_path)?;
 
-        if duplicates_file.entries.is_empty() {
-            if !self.quiet {
-                println!(
-                    "{} No duplicates to erase.",
-                    style(INFO_PREFIX).blue().bold()
-                );
-            }
-            return Ok(());
-        }
-
-        // Collect all files to delete
-        let files_to_delete: Vec<PathBuf> = duplicates_file
-            .entries
-            .iter()
-            .flat_map(|entry| entry.duplicates.clone())
-            .collect();
-
-        if files_to_delete.is_empty() {
-            if !self.quiet {
-                println!(
-                    "{} No duplicate files to erase.",
-                    style(INFO_PREFIX).blue().bold()
-                );
-            }
-            return Ok(());
-        }
-
-        if !self.quiet {
-            println!(
-                "{} Found {} duplicate files to erase from {} groups.",
-                style(INFO_PREFIX).blue().bold(),
-                style(files_to_delete.len()).cyan().bold(),
-                style(duplicates_file.entries.len()).cyan()
-            );
-        }
-
-        // Verify all files exist - show spinner while checking
-        let spinner = if !self.quiet {
-            let sp = ProgressBar::new_spinner();
-            sp.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.cyan} {msg}")
-                    .unwrap(),
-            );
-            sp.set_message("Validating files...");
-            sp.enable_steady_tick(std::time::Duration::from_millis(100));
-            Some(sp)
-        } else {
-            None
-        };
-
-        let missing_files: Vec<&PathBuf> = files_to_delete
-            .iter()
-            .filter(|f| !f.exists())
-            .collect();
-
+        let spinner = output::spinner(self.quiet, "Verifying files against the scan...");
+        let plan = verify(&duplicates_file);
         if let Some(sp) = spinner {
             sp.finish_and_clear();
         }
 
-        if !missing_files.is_empty() {
-            log::warn!("Some files no longer exist: {:?}", missing_files);
-            if !self.quiet {
-                println!(
-                    "{} {} files no longer exist and will be skipped.",
-                    style(WARNING_PREFIX).yellow().bold(),
-                    style(missing_files.len()).yellow()
-                );
-            }
+        for (path, reason) in &plan.skipped {
+            self.say(format!(
+                "{} Keeping {} ({})",
+                output::warn(),
+                style(display_path(path, &duplicates_file.root)).yellow(),
+                reason.describe()
+            ));
         }
 
-        let existing_files: Vec<&PathBuf> = files_to_delete
-            .iter()
-            .filter(|f| f.exists())
-            .collect();
-
-        if existing_files.is_empty() {
-            if !self.quiet {
-                println!(
-                    "{} No existing files to erase.",
-                    style(INFO_PREFIX).blue().bold()
-                );
-            }
+        if plan.delete.is_empty() {
+            self.say(format!("{} Nothing to erase.", output::info()));
             return Ok(());
         }
 
-        // Perform atomic deletion
-        match atomic_delete(&existing_files, &self.staging_dir(), self.quiet) {
-            Ok(deleted_count) => {
-                if !self.quiet {
-                    println!(
-                        "{} Successfully erased {} duplicate files.",
-                        style(SUCCESS_PREFIX).green().bold(),
-                        style(deleted_count).green().bold()
-                    );
-                }
+        let total_bytes: u64 = plan.delete.iter().map(|r| r.size).sum();
 
-                // Remove the duplicates.json file after successful deletion
-                fs::remove_file(&duplicates_path)?;
-                if !self.quiet {
-                    println!(
-                        "{} Removed: {}",
-                        style(SUCCESS_PREFIX).green().bold(),
-                        style(duplicates_path.display()).cyan()
-                    );
-                }
-
-                log::info!(
-                    "Erase complete: {} files deleted, duplicates.json removed",
-                    deleted_count
-                );
+        if self.dry_run {
+            for record in &plan.delete {
+                self.say(format!(
+                    "  {} {}",
+                    style("would delete").red(),
+                    display_path(&record.path, &duplicates_file.root)
+                ));
             }
-            Err(e) => {
-                log::error!("Erase failed, all files restored: {}", e);
-                return Err(e);
-            }
+            self.say(format!(
+                "{} Dry run: {} files ({}) would be erased. Nothing was deleted.",
+                output::info(),
+                style(plan.delete.len()).cyan().bold(),
+                human_size(total_bytes)
+            ));
+            return Ok(());
         }
 
+        if !self.assume_yes && !confirm(plan.delete.len(), total_bytes)? {
+            self.say(format!("{} Aborted. Nothing was deleted.", output::info()));
+            return Ok(());
+        }
+
+        // Staging inside the scanned root keeps renames on the same filesystem
+        // as the files, even when the duplicates file was saved elsewhere.
+        let staging_dir = duplicates_file.root.join(STAGING_DIR_NAME);
+        let paths: Vec<&Path> = plan.delete.iter().map(|r| r.path.as_path()).collect();
+        let deleted_count = atomic_delete(&paths, &staging_dir, self.quiet)?;
+
+        self.say(format!(
+            "{} Erased {} duplicate files, freeing {}.",
+            output::ok(),
+            style(deleted_count).green().bold(),
+            style(human_size(total_bytes)).green().bold()
+        ));
+
+        // The duplicates file describes a state that no longer exists.
+        fs::remove_file(&duplicates_path)?;
+        self.say(format!(
+            "{} Removed: {}",
+            output::ok(),
+            style(duplicates_path.display()).cyan()
+        ));
+        if !plan.skipped.is_empty() {
+            self.say(format!(
+                "{} {} listed files were kept. Re-run 'mde scan' to re-check them.",
+                output::info(),
+                plan.skipped.len()
+            ));
+        }
+
+        log::info!("Erase complete: {} files deleted", deleted_count);
         Ok(())
     }
 }
 
-/// Atomically deletes files by first moving them to a staging directory,
-/// then permanently deleting them. If any operation fails, all files are restored.
-fn atomic_delete(files: &[&PathBuf], staging_dir: &Path, quiet: bool) -> Result<usize> {
-    // Clean up any leftover staging directory from previous failed runs
-    if staging_dir.exists() {
-        log::warn!("Found leftover staging directory, cleaning up...");
-        fs::remove_dir_all(staging_dir)?;
-    }
-
-    // Create staging directory
-    fs::create_dir_all(staging_dir)?;
-    log::debug!("Created staging directory: {:?}", staging_dir);
-
-    // Track moved files for potential rollback
-    let mut moved_files: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    // Progress bar for Phase 1: Staging files
-    let progress_bar = if !quiet {
-        let pb = ProgressBar::new(files.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        pb.set_message("Staging files...");
-        Some(pb)
-    } else {
-        None
+/// Checks every entry against the disk and decides what can safely be deleted.
+///
+/// A duplicate is only deleted when its original still exists unchanged, the
+/// duplicate itself is unchanged since the scan, and, for exact duplicates,
+/// both files still have identical content.
+fn verify(file: &DuplicatesFile) -> ErasePlan {
+    let originals: HashSet<&Path> = file
+        .entries
+        .iter()
+        .map(|e| e.original.path.as_path())
+        .collect();
+    let mut seen: HashSet<&Path> = HashSet::new();
+    let mut plan = ErasePlan {
+        delete: Vec::new(),
+        skipped: Vec::new(),
     };
 
-    // Phase 1: Move all files to staging
-    for (index, file) in files.iter().enumerate() {
-        let staged_path = staging_dir.join(format!("{}", index));
+    for entry in &file.entries {
+        let original_ok = entry.original.is_unchanged();
+        let mut original_hash: Option<Option<String>> = None;
 
-        match fs::rename(file, &staged_path) {
-            Ok(()) => {
-                log::debug!("Staged: {:?} -> {:?}", file, staged_path);
-                moved_files.push(((*file).clone(), staged_path));
-                if let Some(ref pb) = progress_bar {
-                    pb.set_position((index + 1) as u64);
-                }
+        for dup in &entry.duplicates {
+            if !seen.insert(dup.path.as_path()) {
+                continue;
             }
-            Err(e) => {
-                log::error!("Failed to stage {:?}: {}", file, e);
+            let reason =
+                if dup.path == entry.original.path || originals.contains(dup.path.as_path()) {
+                    Some(SkipReason::IsAnOriginal)
+                } else if !original_ok {
+                    Some(SkipReason::OriginalMissing)
+                } else if !dup.path.exists() {
+                    Some(SkipReason::Missing)
+                } else if !dup.is_unchanged() {
+                    Some(SkipReason::Changed)
+                } else if entry.duplicate_type == DuplicateType::Exact {
+                    let original_hash = original_hash
+                        .get_or_insert_with(|| hasher::sha256_hash(&entry.original.path).ok());
+                    let dup_hash = hasher::sha256_hash(&dup.path).ok();
+                    (original_hash.is_none() || dup_hash != *original_hash)
+                        .then_some(SkipReason::Changed)
+                } else {
+                    None
+                };
 
-                if let Some(ref pb) = progress_bar {
-                    pb.finish_and_clear();
-                }
-
-                if !quiet {
-                    println!(
-                        "{} Failed to stage: {}",
-                        style(ERROR_PREFIX).red().bold(),
-                        style(file.display()).red()
-                    );
-                }
-
-                // Rollback: restore all moved files
-                rollback(&moved_files, quiet)?;
-
-                // Clean up staging directory
-                if staging_dir.exists() {
-                    let _ = fs::remove_dir_all(staging_dir);
-                }
-
-                return Err(Error::Io(e));
+            match reason {
+                Some(reason) => plan.skipped.push((dup.path.clone(), reason)),
+                None => plan.delete.push(dup.clone()),
             }
         }
     }
 
+    plan
+}
+
+/// Asks the user to confirm the deletion on the terminal.
+fn confirm(count: usize, bytes: u64) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Err(Error::ConfirmationRequired);
+    }
+    print!(
+        "Permanently delete {} files ({})? [y/N] ",
+        style(count).red().bold(),
+        human_size(bytes)
+    );
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+/// Deletes files by first moving them all to a staging directory, then
+/// permanently deleting them.
+///
+/// If any file cannot be moved, every file already moved is restored and
+/// nothing is deleted. A `restore.tsv` inside the staging directory maps each
+/// staged file back to its original path, so files can be recovered by hand
+/// if the process is interrupted.
+fn atomic_delete(files: &[&Path], staging_dir: &Path, quiet: bool) -> Result<usize> {
+    // A leftover staging directory may hold files a previous rollback could
+    // not restore; never delete it automatically.
+    if staging_dir.exists() {
+        return Err(Error::StagingDirExists(staging_dir.to_path_buf()));
+    }
+
+    fs::create_dir_all(staging_dir)?;
+    log::debug!("Created staging directory: {:?}", staging_dir);
+
+    let staged: Vec<(PathBuf, PathBuf)> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.to_path_buf(), staging_dir.join(i.to_string())))
+        .collect();
+
+    let restore_map: String = staged
+        .iter()
+        .map(|(original, staged)| format!("{}\t{}\n", staged.display(), original.display()))
+        .collect();
+    fs::write(staging_dir.join(RESTORE_FILENAME), restore_map)?;
+
+    // Phase 1: Move all files to staging
+    let progress_bar = output::progress_bar(quiet, files.len() as u64, "Staging files...");
+    for (index, (original, staged_path)) in staged.iter().enumerate() {
+        if let Err(e) = fs::rename(original, staged_path) {
+            if let Some(ref pb) = progress_bar {
+                pb.finish_and_clear();
+            }
+            log::error!("Failed to stage {:?}: {}", original, e);
+            if !quiet {
+                println!(
+                    "{} Failed to move {}: {}",
+                    output::error(),
+                    style(original.display()).red(),
+                    e
+                );
+            }
+            rollback(&staged[..index], staging_dir, quiet);
+            return Err(Error::EraseFailed {
+                reason: format!(
+                    "could not move {} into {} ({}). Nothing was deleted",
+                    original.display(),
+                    staging_dir.display(),
+                    e
+                ),
+            });
+        }
+        log::debug!("Staged: {:?} -> {:?}", original, staged_path);
+        if let Some(ref pb) = progress_bar {
+            pb.inc(1);
+        }
+    }
     if let Some(ref pb) = progress_bar {
         pb.finish_and_clear();
     }
 
     // Phase 2: All files staged successfully, now permanently delete
-    // Show spinner during final deletion
-    let spinner = if !quiet {
-        let sp = ProgressBar::new_spinner();
-        sp.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
-        );
-        sp.set_message("Finalizing deletion...");
-        sp.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(sp)
-    } else {
-        None
-    };
+    let spinner = output::spinner(quiet, "Finalizing deletion...");
+    let result = fs::remove_dir_all(staging_dir);
+    if let Some(sp) = spinner {
+        sp.finish_and_clear();
+    }
 
-    let deleted_count = moved_files.len();
-
-    match fs::remove_dir_all(staging_dir) {
+    match result {
         Ok(()) => {
-            if let Some(sp) = spinner {
-                sp.finish_and_clear();
-            }
-            log::info!("Permanently deleted {} files", deleted_count);
-            Ok(deleted_count)
+            log::info!("Permanently deleted {} files", staged.len());
+            Ok(staged.len())
         }
         Err(e) => {
-            if let Some(sp) = spinner {
-                sp.finish_and_clear();
-            }
             log::error!("Failed to delete staging directory: {}", e);
-
-            if !quiet {
-                println!(
-                    "{} Failed to finalize deletion, rolling back...",
-                    style(ERROR_PREFIX).red().bold()
-                );
-            }
-
-            // Try to rollback
-            rollback(&moved_files, quiet)?;
-
-            Err(Error::Io(e))
+            let remaining: Vec<(PathBuf, PathBuf)> =
+                staged.into_iter().filter(|(_, s)| s.exists()).collect();
+            let deleted = files.len() - remaining.len();
+            rollback(&remaining, staging_dir, quiet);
+            Err(Error::EraseFailed {
+                reason: format!(
+                    "could not finish deleting ({}). {} files were deleted, {} were restored",
+                    e,
+                    deleted,
+                    remaining.len()
+                ),
+            })
         }
     }
 }
 
 /// Restores files from staging back to their original locations.
-fn rollback(moved_files: &[(PathBuf, PathBuf)], quiet: bool) -> Result<()> {
+///
+/// The staging directory is only removed if every file was restored;
+/// otherwise it is left in place with its `restore.tsv` for manual recovery.
+fn rollback(moved_files: &[(PathBuf, PathBuf)], staging_dir: &Path, quiet: bool) {
     log::warn!("Rolling back {} files...", moved_files.len());
-
     if !quiet {
         println!(
-            "{} Rolling back {} files...",
-            style(INFO_PREFIX).cyan().bold(),
+            "{} Restoring {} files...",
+            output::info(),
             style(moved_files.len()).cyan()
         );
     }
 
+    let mut failed = 0;
     for (original_path, staged_path) in moved_files {
-        if staged_path.exists() {
-            match fs::rename(staged_path, original_path) {
-                Ok(()) => {
-                    log::debug!("Restored: {:?}", original_path);
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to restore {:?} from {:?}: {}",
-                        original_path,
-                        staged_path,
-                        e
-                    );
-                    if !quiet {
-                        println!(
-                            "{} Failed to restore: {}",
-                            style(ERROR_PREFIX).red().bold(),
-                            style(original_path.display()).red()
-                        );
-                    }
-                    // Continue trying to restore other files
-                }
+        if let Err(e) = fs::rename(staged_path, original_path) {
+            failed += 1;
+            log::error!(
+                "Failed to restore {:?} from {:?}: {}",
+                original_path,
+                staged_path,
+                e
+            );
+            if !quiet {
+                println!(
+                    "{} Failed to restore: {}",
+                    output::error(),
+                    style(original_path.display()).red()
+                );
             }
         }
     }
 
-    if !quiet {
+    if failed == 0 {
+        let _ = fs::remove_dir_all(staging_dir);
+        if !quiet {
+            println!("{} All files restored.", output::info());
+        }
+    } else if !quiet {
         println!(
-            "{} Rollback complete. No files were deleted.",
-            style(INFO_PREFIX).cyan().bold()
+            "{} {} files could not be restored and are still in {} (see {} there).",
+            output::error(),
+            failed,
+            style(staging_dir.display()).red(),
+            RESTORE_FILENAME
         );
     }
-    Ok(())
 }

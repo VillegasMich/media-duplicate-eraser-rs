@@ -2,8 +2,8 @@
 
 use std::fs;
 
-use media_duplicate_eraser_rs::commands::clean::Cleaner;
 use media_duplicate_eraser_rs::commands::Command;
+use media_duplicate_eraser_rs::commands::clean::Cleaner;
 
 use crate::common::{assert_path_exists, assert_path_not_exists, temp_dir};
 

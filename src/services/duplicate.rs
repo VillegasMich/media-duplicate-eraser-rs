@@ -1,28 +1,45 @@
 //! Duplicate detection service.
 //!
-//! Implements a two-pass approach for finding duplicate media files:
-//! 1. **Fast pass**: Group by file size, then SHA256 hash (exact duplicates)
-//! 2. **Slow pass**: Perceptual hash comparison (visually similar images/videos)
+//! Implements a multi-pass approach for finding duplicate media files:
+//! 1. **Size pass**: Group by file size (files of different sizes can't be identical)
+//! 2. **Exact pass**: SHA256 hash within each size group (exact duplicates)
+//! 3. **Perceptual pass**: Perceptual fingerprint comparison (similar media)
+//! 4. **Merge**: Exact groups whose representative is perceptually similar to
+//!    other files are merged into a single group
+//!
+//! Within every group, files are ordered so the one to keep comes first.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chrono::{DateTime, Utc};
-use image_hasher::ImageHash;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::hasher::{self, MediaType};
+use super::hasher::{self, Fingerprint, MediaType};
 use crate::error::Result;
 
 /// Represents a group of duplicate files.
 #[derive(Debug)]
 pub struct DuplicateGroup {
     /// The files that are duplicates of each other.
+    /// The first file is the one to keep; the rest can be removed.
     pub files: Vec<PathBuf>,
     /// The type of duplication detected.
     pub duplicate_type: DuplicateType,
+}
+
+impl DuplicateGroup {
+    /// The file that will be kept.
+    pub fn original(&self) -> &Path {
+        &self.files[0]
+    }
+
+    /// The files that can be removed.
+    pub fn duplicates(&self) -> &[PathBuf] {
+        &self.files[1..]
+    }
 }
 
 /// The type of duplication detected.
@@ -32,10 +49,11 @@ pub enum DuplicateType {
     /// Exact byte-for-byte duplicates (same SHA256 hash).
     Exact,
     /// Visually similar media (similar perceptual hash).
+    /// Groups that mix exact and similar files are also perceptual.
     Perceptual,
 }
 
-/// Filter for which media types to scan.
+/// Filter for which files to scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
     /// Scan all supported media types (images, videos, and audio).
@@ -47,6 +65,8 @@ pub enum MediaFilter {
     VideosOnly,
     /// Scan only audio files.
     AudioOnly,
+    /// Scan every file. Non-media files only get exact (byte-for-byte) matching.
+    AnyFile,
 }
 
 impl MediaFilter {
@@ -54,102 +74,38 @@ impl MediaFilter {
     pub fn includes(&self, path: &Path) -> bool {
         let media_type = hasher::get_media_type(path);
         match self {
-            MediaFilter::All => true,
+            MediaFilter::All => media_type != MediaType::Unknown,
             MediaFilter::ImagesOnly => media_type == MediaType::Image,
             MediaFilter::VideosOnly => media_type == MediaType::Video,
             MediaFilter::AudioOnly => media_type == MediaType::Audio,
+            MediaFilter::AnyFile => true,
         }
     }
 
-    /// Checks if a file should be processed for perceptual hashing based on the filter.
-    pub fn includes_for_perceptual(&self, path: &Path) -> bool {
-        let media_type = hasher::get_media_type(path);
-        match self {
-            MediaFilter::All => {
-                media_type == MediaType::Image
-                    || media_type == MediaType::Video
-                    || media_type == MediaType::Audio
-            }
-            MediaFilter::ImagesOnly => media_type == MediaType::Image,
-            MediaFilter::VideosOnly => media_type == MediaType::Video,
-            MediaFilter::AudioOnly => media_type == MediaType::Audio,
-        }
+    /// Whether this filter can include video or audio files, which need FFmpeg.
+    pub fn needs_ffmpeg(&self) -> bool {
+        !matches!(self, MediaFilter::ImagesOnly)
     }
 }
 
-/// A duplicate entry in the output file.
-/// Contains only the copies to be deleted, not the original.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DuplicateEntry {
-    /// The original file to keep.
-    pub original: PathBuf,
-    /// The duplicate files to delete.
-    pub duplicates: Vec<PathBuf>,
-    /// The type of duplication.
-    pub duplicate_type: DuplicateType,
+/// Options controlling duplicate detection.
+#[derive(Debug, Clone, Copy)]
+pub struct DetectionOptions {
+    /// Which files to consider.
+    pub filter: MediaFilter,
+    /// Whether to run the perceptual pass. When false, only exact duplicates are found.
+    pub perceptual: bool,
+    /// Maximum Hamming distance for two fingerprints to be considered similar.
+    pub threshold: u32,
 }
 
-/// The duplicates file structure that will be saved to JSON.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DuplicatesFile {
-    /// Version of the file format.
-    pub version: String,
-    /// Timestamp when the scan was performed.
-    pub scanned_at: DateTime<Utc>,
-    /// Total number of files scanned.
-    pub total_files_scanned: usize,
-    /// Number of duplicate groups found.
-    pub duplicate_groups: usize,
-    /// Total number of duplicate files (to be deleted).
-    pub total_duplicates: usize,
-    /// The duplicate entries.
-    pub entries: Vec<DuplicateEntry>,
-}
-
-impl DuplicatesFile {
-    /// Creates a new DuplicatesFile from a DuplicateReport.
-    pub fn from_report(report: &DuplicateReport) -> Self {
-        let entries: Vec<DuplicateEntry> = report
-            .groups
-            .iter()
-            .map(|group| {
-                let mut files = group.files.clone();
-                // First file is the original to keep
-                let original = files.remove(0);
-                DuplicateEntry {
-                    original,
-                    duplicates: files,
-                    duplicate_type: group.duplicate_type,
-                }
-            })
-            .collect();
-
-        let total_duplicates = entries.iter().map(|e| e.duplicates.len()).sum();
-
+impl Default for DetectionOptions {
+    fn default() -> Self {
         Self {
-            version: "1.0".to_string(),
-            scanned_at: Utc::now(),
-            total_files_scanned: report.total_files,
-            duplicate_groups: report.groups.len(),
-            total_duplicates,
-            entries,
+            filter: MediaFilter::All,
+            perceptual: true,
+            threshold: hasher::DEFAULT_SIMILARITY_THRESHOLD,
         }
-    }
-
-    /// Saves the duplicates file to the specified path.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)?;
-        log::info!("Duplicates file saved to {:?}", path);
-        Ok(())
-    }
-
-    /// Loads a duplicates file from the specified path.
-    pub fn load(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let duplicates: DuplicatesFile = serde_json::from_reader(file)?;
-        Ok(duplicates)
     }
 }
 
@@ -160,119 +116,133 @@ pub struct DuplicateReport {
     pub groups: Vec<DuplicateGroup>,
     /// Total number of files scanned.
     pub total_files: usize,
+    /// Number of empty files that were ignored.
+    pub empty_files: usize,
     /// Number of files that could not be processed.
     pub errors: usize,
+    /// Size in bytes of every file that ended up in a group.
+    sizes: HashMap<PathBuf, u64>,
 }
 
 impl DuplicateReport {
     /// Returns the total number of duplicate files (excluding one original per group).
     pub fn duplicate_count(&self) -> usize {
-        self.groups
-            .iter()
-            .map(|g| g.files.len().saturating_sub(1))
-            .sum()
+        self.groups.iter().map(|g| g.duplicates().len()).sum()
     }
 
     /// Returns the number of exact duplicates.
     pub fn exact_duplicate_count(&self) -> usize {
-        self.groups
-            .iter()
-            .filter(|g| g.duplicate_type == DuplicateType::Exact)
-            .map(|g| g.files.len().saturating_sub(1))
-            .sum()
+        self.count_of(DuplicateType::Exact)
     }
 
     /// Returns the number of perceptual duplicates.
     pub fn perceptual_duplicate_count(&self) -> usize {
+        self.count_of(DuplicateType::Perceptual)
+    }
+
+    fn count_of(&self, duplicate_type: DuplicateType) -> usize {
         self.groups
             .iter()
-            .filter(|g| g.duplicate_type == DuplicateType::Perceptual)
-            .map(|g| g.files.len().saturating_sub(1))
+            .filter(|g| g.duplicate_type == duplicate_type)
+            .map(|g| g.duplicates().len())
+            .sum()
+    }
+
+    /// Size of a file in a duplicate group, as measured during the scan.
+    pub fn size_of(&self, path: &Path) -> u64 {
+        self.sizes.get(path).copied().unwrap_or(0)
+    }
+
+    /// Total bytes that would be freed by removing every duplicate.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.groups
+            .iter()
+            .flat_map(|g| g.duplicates())
+            .map(|p| self.size_of(p))
             .sum()
     }
 }
 
 /// Progress callback for duplicate detection.
-/// Called with (current_file_index, total_files, phase_name).
+/// Called with (files_done_in_phase, files_in_phase, phase_name).
 pub type ProgressCallback = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
 
-/// Finds duplicate media files using a two-pass approach.
+/// Finds duplicate media files using the default options.
 pub fn find_duplicates(files: &[PathBuf]) -> Result<DuplicateReport> {
-    find_duplicates_with_options(files, None, MediaFilter::All)
+    find_duplicates_with_options(files, None, DetectionOptions::default())
 }
 
-/// Finds duplicate media files using a two-pass approach with optional progress callback.
-pub fn find_duplicates_with_progress(
-    files: &[PathBuf],
-    progress: Option<ProgressCallback>,
-) -> Result<DuplicateReport> {
-    find_duplicates_with_options(files, progress, MediaFilter::All)
-}
-
-/// Finds duplicate media files with full options.
+/// Finds duplicate files with full options and an optional progress callback.
 pub fn find_duplicates_with_options(
     files: &[PathBuf],
     progress: Option<ProgressCallback>,
-    filter: MediaFilter,
+    options: DetectionOptions,
 ) -> Result<DuplicateReport> {
-    // Filter files based on media type if not scanning all
-    let filtered_files: Vec<PathBuf> = if filter == MediaFilter::All {
-        files.to_vec()
-    } else {
-        files
-            .iter()
-            .filter(|p| filter.includes(p))
-            .cloned()
-            .collect()
-    };
-
-    let mut exact_groups: Vec<DuplicateGroup> = Vec::new();
-    let mut errors = 0;
+    let filtered_files: Vec<&PathBuf> = files
+        .iter()
+        .filter(|p| options.filter.includes(p))
+        .collect();
     let total_files = filtered_files.len();
+    let mut errors = 0;
 
     log::info!("Starting duplicate detection for {} files", total_files);
 
     // Pass 1: Group by file size
     log::debug!("Pass 1: Grouping by file size");
-    let size_groups = group_by_size(&filtered_files, &mut errors);
+    let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
+    let mut size_groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut empty_files = 0;
+    for path in filtered_files {
+        match hasher::file_size(path) {
+            // Empty files are all "identical" but never meaningful duplicates.
+            Ok(0) => empty_files += 1,
+            Ok(size) => {
+                sizes.insert(path.clone(), size);
+                size_groups.entry(size).or_default().push(path.clone());
+            }
+            Err(e) => {
+                log::warn!("Could not get size of {:?}: {}", path, e);
+                errors += 1;
+            }
+        }
+    }
 
     // Pass 2: Within each size group, find exact duplicates by SHA256
     log::debug!("Pass 2: Finding exact duplicates by SHA256");
-    let mut files_for_perceptual: Vec<PathBuf> = Vec::new();
-    let mut processed = 0;
-
+    let mut singletons: Vec<PathBuf> = Vec::new();
+    let mut to_hash: Vec<PathBuf> = Vec::new();
     for (_size, paths) in size_groups {
         if paths.len() < 2 {
-            // Only one file with this size, still needs perceptual comparison
-            files_for_perceptual.extend(paths.clone());
-            processed += paths.len();
-            if let Some(cb) = progress.as_ref() {
-                cb(processed, total_files, "Hashing files");
-            }
-            continue;
+            singletons.extend(paths);
+        } else {
+            to_hash.extend(paths);
         }
-
-        let (groups, non_duplicates) =
-            find_exact_duplicates_with_progress(&paths, &mut errors, &progress, &mut processed, total_files);
-
-        // Add one representative from each exact duplicate group for perceptual comparison
-        for group in &groups {
-            if let Some(representative) = group.files.first() {
-                files_for_perceptual.push(representative.clone());
-            }
-        }
-
-        exact_groups.extend(groups);
-        files_for_perceptual.extend(non_duplicates);
     }
 
-    // Pass 3: Perceptual hash comparison
-    log::debug!("Pass 3: Finding perceptual duplicates");
-    let perceptual_groups =
-        find_perceptual_duplicates_with_progress(&files_for_perceptual, &mut errors, &progress, filter);
+    let (exact_groups, non_duplicates) = find_exact_duplicates(&to_hash, &mut errors, &progress);
 
-    // Merge perceptual groups with exact groups where they overlap
-    let final_groups = merge_groups(exact_groups, perceptual_groups);
+    // Pass 3: Perceptual comparison over every distinct file
+    let perceptual_groups = if options.perceptual {
+        log::debug!("Pass 3: Finding perceptual duplicates");
+        let mut candidates: Vec<PathBuf> = singletons;
+        candidates.extend(non_duplicates);
+        candidates.extend(exact_groups.iter().map(|g| g.files[0].clone()));
+        candidates.retain(|p| hasher::get_media_type(p) != MediaType::Unknown);
+        // Sorting makes grouping deterministic regardless of hashing order.
+        candidates.sort();
+        find_perceptual_duplicates(&candidates, &progress, options.threshold)
+    } else {
+        Vec::new()
+    };
+
+    // Pass 4: Merge perceptual groups with exact groups where they overlap
+    let mut final_groups = merge_groups(exact_groups, perceptual_groups);
+    for group in &mut final_groups {
+        order_for_keeping(group, &sizes);
+    }
+    final_groups.sort_by(|a, b| a.files[0].cmp(&b.files[0]));
+
+    sizes.retain(|path, _| final_groups.iter().any(|g| g.files.contains(path)));
 
     log::info!(
         "Duplicate detection complete: {} groups found",
@@ -282,8 +252,28 @@ pub fn find_duplicates_with_options(
     Ok(DuplicateReport {
         groups: final_groups,
         total_files,
+        empty_files,
         errors,
+        sizes,
     })
+}
+
+/// Orders a group's files so the best one to keep comes first.
+///
+/// - Exact duplicates are byte-identical, so the file with the "cleanest" path
+///   is kept: the shallowest, then the shortest path (so `photo.jpg` beats
+///   `photo copy.jpg` and `backup/old/photo.jpg`), then alphabetical.
+/// - Perceptual groups keep the largest file, which is usually the highest
+///   quality version (original resolution, least compression), with the same
+///   path rules as a tie-breaker.
+fn order_for_keeping(group: &mut DuplicateGroup, sizes: &HashMap<PathBuf, u64>) {
+    let path_key = |p: &PathBuf| (p.components().count(), p.as_os_str().len(), p.clone());
+    match group.duplicate_type {
+        DuplicateType::Exact => group.files.sort_by_key(path_key),
+        DuplicateType::Perceptual => group
+            .files
+            .sort_by_key(|p| (Reverse(sizes.get(p).copied().unwrap_or(0)), path_key(p))),
+    }
 }
 
 /// Merges exact and perceptual groups, expanding exact groups when their
@@ -305,18 +295,15 @@ fn merge_groups(
     // Track which exact groups have been merged
     let mut merged_exact_groups: Vec<bool> = vec![false; exact_groups.len()];
 
-    // Process perceptual groups
     for perceptual_group in perceptual_groups {
         let mut merged_files: Vec<PathBuf> = Vec::new();
-        let mut has_exact_duplicates = false;
 
         for file in perceptual_group.files {
             if let Some(&exact_idx) = file_to_exact_group.get(&file) {
                 // This file is part of an exact group, include all files from that group
                 if !merged_exact_groups[exact_idx] {
-                    merged_files.extend(exact_groups[exact_idx].files.clone());
+                    merged_files.extend(exact_groups[exact_idx].files.iter().cloned());
                     merged_exact_groups[exact_idx] = true;
-                    has_exact_duplicates = true;
                 }
             } else {
                 merged_files.push(file);
@@ -324,18 +311,12 @@ fn merge_groups(
         }
 
         if merged_files.len() > 1 {
-            // Deduplicate in case of overlaps
             merged_files.sort();
             merged_files.dedup();
 
             final_groups.push(DuplicateGroup {
                 files: merged_files,
-                // If it contains exact duplicates, mark as perceptual since it's a mixed group
-                duplicate_type: if has_exact_duplicates {
-                    DuplicateType::Perceptual
-                } else {
-                    DuplicateType::Perceptual
-                },
+                duplicate_type: DuplicateType::Perceptual,
             });
         }
     }
@@ -350,48 +331,37 @@ fn merge_groups(
     final_groups
 }
 
-/// Groups files by their size.
-fn group_by_size(files: &[PathBuf], errors: &mut usize) -> HashMap<u64, Vec<PathBuf>> {
-    let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-
-    for path in files {
-        match hasher::file_size(path) {
-            Ok(size) => {
-                size_map.entry(size).or_default().push(path.clone());
-            }
-            Err(e) => {
-                log::warn!("Could not get size of {:?}: {}", path, e);
-                *errors += 1;
-            }
-        }
-    }
-
-    size_map
-}
-
-/// Finds exact duplicates with progress reporting.
-fn find_exact_duplicates_with_progress(
+/// Finds exact duplicates by SHA256, hashing files in parallel.
+///
+/// Returns the exact duplicate groups and the files that had no exact match.
+fn find_exact_duplicates(
     files: &[PathBuf],
     errors: &mut usize,
     progress: &Option<ProgressCallback>,
-    processed: &mut usize,
-    total: usize,
 ) -> (Vec<DuplicateGroup>, Vec<PathBuf>) {
-    let mut hash_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let total = files.len();
+    let done = AtomicUsize::new(0);
 
-    for path in files {
-        match hasher::sha256_hash(path) {
-            Ok(hash) => {
-                hash_map.entry(hash).or_default().push(path.clone());
+    let hashes: Vec<(PathBuf, Result<String>)> = files
+        .par_iter()
+        .map(|path| {
+            let hash = hasher::sha256_hash(path);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(cb) = progress {
+                cb(n, total, "Hashing files");
             }
+            (path.clone(), hash)
+        })
+        .collect();
+
+    let mut hash_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (path, hash) in hashes {
+        match hash {
+            Ok(hash) => hash_map.entry(hash).or_default().push(path),
             Err(e) => {
                 log::warn!("Could not hash {:?}: {}", path, e);
                 *errors += 1;
             }
-        }
-        *processed += 1;
-        if let Some(cb) = progress {
-            cb(*processed, total, "Hashing files");
         }
     }
 
@@ -412,64 +382,47 @@ fn find_exact_duplicates_with_progress(
     (groups, non_duplicates)
 }
 
-/// Finds perceptually similar media files with progress reporting.
-fn find_perceptual_duplicates_with_progress(
+/// Finds perceptually similar media files.
+///
+/// Fingerprints are computed in parallel. Grouping is greedy: each file not yet
+/// grouped starts a group, and every later file similar to it joins.
+fn find_perceptual_duplicates(
     files: &[PathBuf],
-    errors: &mut usize,
     progress: &Option<ProgressCallback>,
-    filter: MediaFilter,
+    threshold: u32,
 ) -> Vec<DuplicateGroup> {
-    // Compute perceptual hashes for all supported media files
-    let mut hashes: Vec<(PathBuf, ImageHash)> = Vec::new();
     let total = files.len();
+    let done = AtomicUsize::new(0);
 
-    for (i, path) in files.iter().enumerate() {
-        // Check if file should be processed based on filter
-        if !filter.includes_for_perceptual(path) {
+    let fingerprints: Vec<(PathBuf, Fingerprint)> = files
+        .par_iter()
+        .filter_map(|path| {
+            let fingerprint = hasher::media_fingerprint(path);
+            if fingerprint.is_none() {
+                log::debug!("No perceptual fingerprint for {:?}", path);
+            }
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = progress {
-                cb(i + 1, total, "Analyzing media");
+                cb(n, total, "Analyzing media");
             }
-            continue;
-        }
+            fingerprint.map(|f| (path.clone(), f))
+        })
+        .collect();
 
-        // Use the unified media perceptual hash function
-        match hasher::media_perceptual_hash(path) {
-            Ok(Some(hash)) => {
-                hashes.push((path.clone(), hash));
-            }
-            Ok(None) => {
-                // Not a supported media file, skip
-                log::debug!("Skipping unsupported file: {:?}", path);
-            }
-            Err(e) => {
-                log::warn!("Could not compute perceptual hash for {:?}: {}", path, e);
-                *errors += 1;
-            }
-        }
-        if let Some(cb) = progress {
-            cb(i + 1, total, "Analyzing media");
-        }
-    }
-
-    // Find similar media using union-find approach
     let mut groups: Vec<DuplicateGroup> = Vec::new();
-    let mut used: Vec<bool> = vec![false; hashes.len()];
+    let mut used: Vec<bool> = vec![false; fingerprints.len()];
 
-    for i in 0..hashes.len() {
+    for i in 0..fingerprints.len() {
         if used[i] {
             continue;
         }
 
-        let mut group_files = vec![hashes[i].0.clone()];
+        let mut group_files = vec![fingerprints[i].0.clone()];
         used[i] = true;
 
-        for j in (i + 1)..hashes.len() {
-            if used[j] {
-                continue;
-            }
-
-            if hasher::are_similar(&hashes[i].1, &hashes[j].1) {
-                group_files.push(hashes[j].0.clone());
+        for j in (i + 1)..fingerprints.len() {
+            if !used[j] && fingerprints[i].1.is_similar(&fingerprints[j].1, threshold) {
+                group_files.push(fingerprints[j].0.clone());
                 used[j] = true;
             }
         }
@@ -483,4 +436,53 @@ fn find_perceptual_duplicates_with_progress(
     }
 
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(files: &[&str], duplicate_type: DuplicateType) -> DuplicateGroup {
+        DuplicateGroup {
+            files: files.iter().map(PathBuf::from).collect(),
+            duplicate_type,
+        }
+    }
+
+    #[test]
+    fn exact_groups_keep_the_cleanest_path() {
+        let mut g = group(
+            &[
+                "/p/backup/old/photo.jpg",
+                "/p/photo copy.jpg",
+                "/p/photo.jpg",
+            ],
+            DuplicateType::Exact,
+        );
+        order_for_keeping(&mut g, &HashMap::new());
+        assert_eq!(g.original(), Path::new("/p/photo.jpg"));
+        assert_eq!(g.duplicates()[0], PathBuf::from("/p/photo copy.jpg"));
+    }
+
+    #[test]
+    fn perceptual_groups_keep_the_largest_file() {
+        let mut g = group(
+            &["/p/a.jpg", "/p/sub/a_full.png"],
+            DuplicateType::Perceptual,
+        );
+        let sizes = HashMap::from([
+            (PathBuf::from("/p/a.jpg"), 100),
+            (PathBuf::from("/p/sub/a_full.png"), 5000),
+        ]);
+        order_for_keeping(&mut g, &sizes);
+        assert_eq!(g.original(), Path::new("/p/sub/a_full.png"));
+    }
+
+    #[test]
+    fn media_filter_all_excludes_non_media() {
+        assert!(MediaFilter::All.includes(Path::new("a.png")));
+        assert!(!MediaFilter::All.includes(Path::new("a.txt")));
+        assert!(MediaFilter::AnyFile.includes(Path::new("a.txt")));
+        assert!(!MediaFilter::ImagesOnly.includes(Path::new("a.mp4")));
+    }
 }
