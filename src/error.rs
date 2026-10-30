@@ -44,4 +44,36 @@ pub enum Error {
         /// The reason why the path is invalid.
         reason: String,
     },
+
+    /// The duplicates file cannot be used by this version of the tool.
+    #[error("Unusable duplicates file {path}: {reason}. Re-run 'mde scan' to regenerate it.")]
+    InvalidDuplicatesFile {
+        /// The duplicates file that was rejected.
+        path: PathBuf,
+        /// Why the file was rejected.
+        reason: String,
+    },
+
+    /// A staging directory from an earlier erase is still present.
+    ///
+    /// It may contain files that could not be restored, so it is never
+    /// removed automatically.
+    #[error(
+        "Staging directory {0} already exists from an interrupted erase. \
+         It may contain your files (see restore.tsv inside). Restore or remove it manually, then retry."
+    )]
+    StagingDirExists(PathBuf),
+
+    /// Erasing requires confirmation, but no terminal is available to ask.
+    #[error(
+        "Refusing to erase without confirmation in a non-interactive session. Pass --yes to proceed."
+    )]
+    ConfirmationRequired,
+
+    /// Erasing failed partway through.
+    #[error("Erase failed: {reason}")]
+    EraseFailed {
+        /// What went wrong, including how many files were affected.
+        reason: String,
+    },
 }

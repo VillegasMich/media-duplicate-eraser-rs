@@ -1,21 +1,18 @@
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 
 use super::Command;
+use super::erase::STAGING_DIR_NAME;
 use crate::error::{Error, Result};
-use crate::services::duplicate::{self, DuplicateType, DuplicatesFile, MediaFilter, ProgressCallback};
+use crate::output::{self, display_path, human_size};
+use crate::services::duplicate::{
+    self, DetectionOptions, DuplicateReport, DuplicateType, MediaFilter, ProgressCallback,
+};
 use crate::services::hasher;
-
-const DEFAULT_OUTPUT_FILENAME: &str = "duplicates.json";
-
-// Styled output prefixes (Classic ASCII)
-const SUCCESS_PREFIX: &str = "[OK]";
-const INFO_PREFIX: &str = "[*]";
-const WARNING_PREFIX: &str = "[!]";
+use crate::services::manifest::{DUPLICATES_FILENAME, DuplicatesFile};
 
 pub struct Scanner {
     path: PathBuf,
@@ -23,7 +20,7 @@ pub struct Scanner {
     include_hidden: bool,
     output: Option<PathBuf>,
     quiet: bool,
-    media_filter: MediaFilter,
+    options: DetectionOptions,
 }
 
 impl Scanner {
@@ -41,70 +38,70 @@ impl Scanner {
             include_hidden,
             output,
             quiet,
-            media_filter,
+            options: DetectionOptions {
+                filter: media_filter,
+                ..DetectionOptions::default()
+            },
         }
+    }
+
+    /// Only report exact (byte-for-byte) duplicates, skipping the perceptual pass.
+    pub fn exact_only(mut self, exact_only: bool) -> Self {
+        self.options.perceptual = !exact_only;
+        self
+    }
+
+    /// Sets the maximum Hamming distance for perceptual matches.
+    pub fn threshold(mut self, threshold: u32) -> Self {
+        self.options.threshold = threshold;
+        self
     }
 
     /// Returns the output path for the duplicates file.
     /// If not specified, defaults to duplicates.json in the scanned directory.
-    fn output_path(&self) -> PathBuf {
-        self.output
-            .clone()
-            .unwrap_or_else(|| self.path.join(DEFAULT_OUTPUT_FILENAME))
+    fn output_path(&self, root: &Path) -> Result<PathBuf> {
+        match &self.output {
+            Some(output) => Ok(std::path::absolute(output)?),
+            None => Ok(root.join(DUPLICATES_FILENAME)),
+        }
     }
 }
 
 impl Command for Scanner {
     fn execute(&self) -> Result<()> {
-        log::info!("Starting scan of directory: {:?}", self.path);
+        // Absolute paths make the duplicates file valid from any working directory.
+        let root = canonical_dir(&self.path)?;
+        let output_path = self.output_path(&root)?;
+
+        log::info!("Starting scan of directory: {:?}", root);
         log::debug!(
-            "Path: {:?}, recursive: {}, include_hidden: {}, output: {:?}, media_filter: {:?}",
-            self.path,
+            "recursive: {}, include_hidden: {}, output: {:?}, options: {:?}",
             self.recursive,
             self.include_hidden,
-            self.output,
-            self.media_filter
+            output_path,
+            self.options
         );
 
-        // Check if FFmpeg is available for video/audio processing
-        let has_ffmpeg = hasher::is_ffmpeg_available();
-        let needs_ffmpeg = self.media_filter == MediaFilter::All
-            || self.media_filter == MediaFilter::VideosOnly
-            || self.media_filter == MediaFilter::AudioOnly;
-        if !has_ffmpeg && needs_ffmpeg {
+        if self.options.perceptual
+            && self.options.filter.needs_ffmpeg()
+            && !hasher::is_ffmpeg_available()
+        {
             if !self.quiet {
                 println!(
-                    "{} FFmpeg not found. Video and audio perceptual hashing disabled.",
-                    style(WARNING_PREFIX).yellow().bold()
+                    "{} FFmpeg/ffprobe not found: similar videos and audio won't be detected (exact copies still will).",
+                    output::warn()
                 );
-                println!(
-                    "   Install FFmpeg or run with --media images to scan only images."
-                );
+                println!("    Install FFmpeg, or use --media images to scan only images.");
             }
-            log::warn!("FFmpeg not available, video and audio perceptual hashing will be skipped");
+            log::info!("FFmpeg not available, video and audio perceptual hashing will be skipped");
         }
 
-        // Spinner for file collection
-        let spinner = if !self.quiet {
-            let sp = ProgressBar::new_spinner();
-            sp.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.cyan} {msg}")
-                    .unwrap(),
-            );
-            sp.set_message("Collecting files...");
-            sp.enable_steady_tick(std::time::Duration::from_millis(100));
-            Some(sp)
-        } else {
-            None
-        };
-
-        let files = list_files(&self.path, self.recursive, self.include_hidden)?;
-
+        let spinner = output::spinner(self.quiet, "Collecting files...");
+        let files = list_files(&root, self.recursive, self.include_hidden, &output_path)?;
         if let Some(sp) = spinner {
             sp.finish_with_message(format!(
                 "{} Found {} files",
-                style(SUCCESS_PREFIX).green().bold(),
+                output::ok(),
                 style(files.len()).cyan()
             ));
         }
@@ -113,72 +110,77 @@ impl Command for Scanner {
 
         if files.is_empty() {
             if !self.quiet {
-                println!(
-                    "{} No files found to scan.",
-                    style(INFO_PREFIX).blue().bold()
-                );
+                println!("{} No files found to scan.", output::info());
             }
             return Ok(());
         }
 
-        // Progress bar for duplicate detection
-        let progress_bar = if !self.quiet {
-            let pb = ProgressBar::new(files.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                    .unwrap()
-                    .progress_chars("=>-"),
-            );
-            pb.set_message("Scanning...");
-            Some(pb)
-        } else {
-            None
-        };
-
-        // Create progress callback
-        let progress_callback: Option<ProgressCallback> = if let Some(ref pb) = progress_bar {
-            let pb_clone = pb.clone();
-            let last_msg = Arc::new(Mutex::new(String::new()));
-            Some(Box::new(move |current, _total, phase| {
-                pb_clone.set_position(current as u64);
-                let mut last = last_msg.lock().unwrap();
+        let progress_bar = output::progress_bar(self.quiet, files.len() as u64, "Scanning...");
+        let progress_callback: Option<ProgressCallback> = progress_bar.clone().map(|pb| {
+            let phase_name = Mutex::new(String::new());
+            Box::new(move |current: usize, total: usize, phase: &str| {
+                let mut last = phase_name.lock().unwrap();
                 if *last != phase {
-                    pb_clone.set_message(phase.to_string());
+                    pb.reset();
+                    pb.set_length(total as u64);
+                    pb.set_message(phase.to_string());
                     *last = phase.to_string();
                 }
-            }))
-        } else {
-            None
-        };
+                pb.set_position(current as u64);
+            }) as ProgressCallback
+        });
 
-        let report = duplicate::find_duplicates_with_options(&files, progress_callback, self.media_filter)?;
+        let report =
+            duplicate::find_duplicates_with_options(&files, progress_callback, self.options)?;
 
         if let Some(pb) = progress_bar {
             pb.finish_and_clear();
         }
 
-        print_report(&report, self.quiet);
-
-        // Save duplicates file if there are duplicates
-        if !report.groups.is_empty() {
-            let output_path = self.output_path();
-            let duplicates_file = DuplicatesFile::from_report(&report);
-            duplicates_file.save(&output_path)?;
-            if !self.quiet {
-                println!(
-                    "{} Duplicates saved to: {}",
-                    style(SUCCESS_PREFIX).green().bold(),
-                    style(output_path.display()).cyan()
-                );
+        if report.groups.is_empty() {
+            print_report(&report, &root, self.quiet);
+            // A duplicates file from an earlier scan no longer describes this
+            // directory; leaving it would let `erase` act on stale data.
+            if output_path.exists() {
+                std::fs::remove_file(&output_path)?;
+                if !self.quiet {
+                    println!(
+                        "{} Removed outdated {}",
+                        output::info(),
+                        style(output_path.display()).cyan()
+                    );
+                }
             }
+            return Ok(());
+        }
+
+        let duplicates_file = DuplicatesFile::from_report(&report, &root);
+        duplicates_file.save(&output_path)?;
+
+        print_report(&report, &root, self.quiet);
+
+        if !self.quiet {
+            println!(
+                "{} Duplicates saved to: {}",
+                output::ok(),
+                style(output_path.display()).cyan()
+            );
+            let erase_target = if self.output.is_some() {
+                &output_path
+            } else {
+                &root
+            };
+            println!(
+                "    Review the list (edit the JSON to keep files), then run: {}",
+                style(format!("mde erase \"{}\"", erase_target.display())).bold()
+            );
         }
 
         Ok(())
     }
 }
 
-fn print_report(report: &duplicate::DuplicateReport, quiet: bool) {
+fn print_report(report: &DuplicateReport, root: &Path, quiet: bool) {
     if quiet {
         return;
     }
@@ -189,89 +191,120 @@ fn print_report(report: &duplicate::DuplicateReport, quiet: bool) {
         style("=== Duplicate Detection Report ===").bold().cyan()
     );
     println!(
-        "Total files scanned: {}",
-        style(report.total_files).cyan()
+        "Scanned:  {} files in {}",
+        style(report.total_files).cyan(),
+        root.display()
     );
-    println!("Errors encountered: {}", report.errors);
+    if report.empty_files > 0 {
+        println!("Ignored:  {} empty files", report.empty_files);
+    }
+    if report.errors > 0 {
+        println!(
+            "{} {} files could not be read (run with -v for details)",
+            output::warn(),
+            style(report.errors).yellow()
+        );
+    }
     println!();
 
     if report.groups.is_empty() {
-        println!(
-            "{} No duplicates found.",
-            style(SUCCESS_PREFIX).green().bold()
-        );
+        println!("{} No duplicates found.", output::ok());
         return;
     }
 
-    let exact_count = report.exact_duplicate_count();
-    let perceptual_count = report.perceptual_duplicate_count();
-    let exact_groups = report
-        .groups
-        .iter()
-        .filter(|g| g.duplicate_type == DuplicateType::Exact)
-        .count();
-    let perceptual_groups = report
-        .groups
-        .iter()
-        .filter(|g| g.duplicate_type == DuplicateType::Perceptual)
-        .count();
-
-    println!(
-        "Found {} duplicate groups ({} exact, {} perceptual)",
-        style(report.groups.len()).cyan().bold(),
-        style(exact_groups).cyan(),
-        style(perceptual_groups).yellow()
-    );
-    println!(
-        "Total duplicate files: {} ({} exact, {} perceptual)",
-        style(report.duplicate_count()).cyan().bold(),
-        style(exact_count).cyan(),
-        style(perceptual_count).yellow()
-    );
-    println!();
-
     for (i, group) in report.groups.iter().enumerate() {
         let type_label = match group.duplicate_type {
-            DuplicateType::Exact => style("[EXACT]").cyan().bold(),
-            DuplicateType::Perceptual => style("[SIMILAR]").yellow().bold(),
+            DuplicateType::Exact => style("EXACT").cyan().bold(),
+            DuplicateType::Perceptual => style("SIMILAR").yellow().bold(),
         };
 
         println!(
-            "Group {} {} - {} files:",
-            style(i + 1).bold(),
+            "{} {} {}",
+            style(format!("Group {}", i + 1)).bold(),
             type_label,
-            style(group.files.len()).bold()
+            style(format!("({} files)", group.files.len())).dim()
         );
-        for file in &group.files {
-            println!("  {}", file.display());
+        println!(
+            "  {} {}  {}",
+            style("keep  ").green().bold(),
+            display_path(group.original(), root),
+            style(human_size(report.size_of(group.original()))).dim()
+        );
+        for file in group.duplicates() {
+            println!(
+                "  {} {}  {}",
+                style("delete").red(),
+                display_path(file, root),
+                style(human_size(report.size_of(file))).dim()
+            );
         }
         println!();
+    }
+
+    println!(
+        "{} {} duplicate groups: {} files can be removed ({} exact, {} similar), freeing {}",
+        style("Summary:").bold(),
+        style(report.groups.len()).cyan().bold(),
+        style(report.duplicate_count()).cyan().bold(),
+        report.exact_duplicate_count(),
+        report.perceptual_duplicate_count(),
+        style(human_size(report.reclaimable_bytes())).green().bold()
+    );
+    if report.perceptual_duplicate_count() > 0 {
+        println!(
+            "    {} SIMILAR files are not identical. Check them before erasing, or rescan with --exact-only.",
+            output::warn()
+        );
     }
 }
 
 // Utils
 
-fn list_files(path: &PathBuf, recursive: bool, include_hidden: bool) -> Result<Vec<PathBuf>> {
+/// Resolves the scan root to an absolute, canonical directory path.
+fn canonical_dir(path: &Path) -> Result<PathBuf> {
     if !path.exists() {
-        return Err(Error::PathNotFound(path.clone()));
+        return Err(Error::PathNotFound(path.to_path_buf()));
     }
+    let root = std::fs::canonicalize(path)?;
+    if !root.is_dir() {
+        return Err(Error::InvalidPath {
+            path: path.to_path_buf(),
+            reason: "not a directory".to_string(),
+        });
+    }
+    Ok(root)
+}
 
+fn list_files(
+    root: &Path,
+    recursive: bool,
+    include_hidden: bool,
+    output_path: &Path,
+) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
     let walker = if recursive {
-        WalkDir::new(path)
+        WalkDir::new(root)
     } else {
-        WalkDir::new(path).max_depth(1)
+        WalkDir::new(root).max_depth(1)
     };
 
-    let walker = walker
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || include_hidden || !is_hidden(e));
+    let walker = walker.into_iter().filter_entry(|e| {
+        e.depth() == 0 || (e.file_name() != STAGING_DIR_NAME && (include_hidden || !is_hidden(e)))
+    });
 
     for entry in walker {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            // An unreadable subdirectory shouldn't abort the whole scan.
+            Err(e) if e.depth() > 0 => {
+                log::warn!("Skipping unreadable entry: {}", e);
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
-        if entry.file_type().is_file() {
+        if entry.file_type().is_file() && entry.path() != output_path {
             files.push(entry.into_path());
         }
     }
