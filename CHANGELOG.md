@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
-This release focuses on making `erase` safe to trust. Several of the fixes below prevented real data loss, and some defaults changed, so it should ship as **2.0.0**.
+## [2.0.0] - 2026-10-29
+
+This release focuses on making `erase` safe to trust. Several of the fixes below prevented real data loss, and some defaults changed (see **Breaking** under Changed).
 
 ### Fixed (data safety)
 - `erase` could delete files that were never scanned: `duplicates.json` stored paths relative to the directory `scan` ran from, and `erase` resolved them against its own working directory. Paths are now absolute, and relative paths are rejected.
@@ -50,3 +52,7 @@ This release focuses on making `erase` safe to trust. Several of the fixes below
 ## [1.0.0]
 
 - Initial release: `scan`, `erase`, `clean`; SHA-256 exact matching and perceptual matching for images, videos and audio.
+
+[Unreleased]: https://github.com/VillegasMich/media-duplicate-eraser-rs/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/VillegasMich/media-duplicate-eraser-rs/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/VillegasMich/media-duplicate-eraser-rs/releases/tag/v1.0.0
